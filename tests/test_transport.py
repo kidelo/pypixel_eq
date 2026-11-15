@@ -319,6 +319,9 @@ def test_device_brightness_default_does_not_touch_the_panel(monkeypatch):
     dev = transport.Device("AA:BB:CC:DD:EE:FF")
     assert "brightness" in dev.client.events
     dev.close()
+
+
+def test_device_close_stops_sender_before_disconnect(monkeypatch):
     """The writer must be joined before the link closes, otherwise a frame
     could be written to a dead session."""
     monkeypatch.setattr(transport, "Client", _FakeClient)
@@ -345,4 +348,30 @@ def test_device_reconnect_replaces_the_writer(monkeypatch):
     assert not first._thread.is_alive()
     dev.update(b"frame")
     assert _wait_for(lambda: dev.send_ms is not None)
+    dev.close()
+
+
+def test_device_push_brightness_sends_the_command(monkeypatch):
+    """push_brightness rides the brightness writer and sends the exact
+    brightness command bytes (one 5-byte write per change)."""
+    from pypixel_eq.transport import brightness_payload
+
+    captured = []
+
+    class Dev(transport.Device):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.captured = captured
+
+        def _execute(self, payload):
+            self.captured.append(payload)
+            super()._execute(payload)  # still drive the real client
+
+    monkeypatch.setattr(transport, "Client", _FakeClient)
+    dev = Dev("AA:BB:CC:DD:EE:FF")
+    dev.captured = captured
+    dev.push_brightness(30)
+    assert _wait_for(lambda: len(captured) >= 1)
+    # The brightness command is the fork's set_brightness bytes.
+    assert captured[0] == brightness_payload(30)
     dev.close()

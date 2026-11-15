@@ -239,22 +239,102 @@ def test_cli_tilt_flag():
     assert Equalizer(tilt=custom.tilt).tilt == -1.5
 
 
-def test_cli_brightness_flag():
-    """--brightness defaults to 100 (the panel's own value) and is
-    validated and forwarded to the engine."""
+def test_cli_brightness_flags():
+    """--brightness-min/--brightness-max default to 100/100 (the panel's
+    own value, unchanged) and are forwarded to the engine."""
     from pypixel_eq.__main__ import build_parser
     args = build_parser().parse_args([])
-    assert args.brightness == 100
-    custom = build_parser().parse_args(["--brightness", "30"])
-    assert custom.brightness == 30
-    eq = Equalizer(brightness=custom.brightness)
+    assert args.brightness_min == 100
+    assert args.brightness_max == 100
+    assert args.brightness_mode == "static"
+    custom = build_parser().parse_args(
+        ["--brightness-min", "30", "--brightness-max", "90"])
+    assert custom.brightness_min == 30
+    assert custom.brightness_max == 90
+    eq = Equalizer(brightness_min=custom.brightness_min,
+                   brightness_max=custom.brightness_max)
     assert eq.brightness == 30
+    assert eq.brightness_max == 90
 
 
 def test_invalid_brightness_rejected():
     for bad in (-1, 101, 150):
         with pytest.raises(ValueError):
-            Equalizer(brightness=bad)
+            Equalizer(brightness_min=bad)
+        with pytest.raises(ValueError):
+            Equalizer(brightness_max=bad)
+    # The minimum must not exceed the maximum.
+    with pytest.raises(ValueError):
+        Equalizer(brightness_min=80, brightness_max=20)
+
+
+class _BrightStub:
+    """A device that records brightness commands (no BLE)."""
+
+    def __init__(self):
+        self.pushed = []
+
+    def push_brightness(self, percent):
+        self.pushed.append(percent)
+
+    def reconnect(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def test_cli_brightness_mode_flag():
+    """--brightness-mode defaults to static; auto is the loudness mode."""
+    from pypixel_eq.__main__ import build_parser
+    args = build_parser().parse_args([])
+    assert args.brightness_mode == "static"
+    custom = build_parser().parse_args(["--brightness-mode", "auto"])
+    assert custom.brightness_mode == "auto"
+    eq = Equalizer(brightness_min=60, brightness_mode="auto")
+    assert eq.brightness_mode == "auto"
+    # The ramp carries both ends (quiet -> 60, loud -> 100).
+    assert eq._bright.bmin == 60
+    assert eq._bright.bmax == 100
+
+
+def test_static_mode_leaves_device_brightness_untouched():
+    """In static mode the ramp is never fed and no brightness command
+    rides on a frame (the fixed minimum is set once at connect)."""
+    eq = Equalizer(brightness_min=100)  # static
+    dev = _BrightStub()
+    out = eq._send_bright(dev, np.zeros(audio.FRAME))
+    assert out is dev
+    assert dev.pushed == []
+    # current_brightness is the fixed value.
+    assert eq.current_brightness == 100
+
+
+def test_auto_mode_sends_only_on_a_step():
+    """In auto mode a brightness command is sent only when the smoothed
+    level moved at least ``step`` from the last value sent - the panel
+    holds whatever it has in between."""
+    eq = Equalizer(brightness_min=50, brightness_max=100,
+                   brightness_mode="auto")
+    dev = _BrightStub()
+    loud = np.full(audio.FRAME, 0.707)
+    # Loud: the level rises and the brightness steps up toward the max.
+    for _ in range(200):
+        eq._send_bright(dev, loud)
+    assert dev.pushed, "loudness must step the brightness up"
+    # Settled near the maximum (a residual of less than one step remains).
+    assert 96 < dev.pushed[-1] <= 100
+    # The panel now holds that value; a further loud frame moves < step,
+    # so no new command is sent.
+    n = len(dev.pushed)
+    eq._send_bright(dev, loud)
+    assert len(dev.pushed) == n
+    # A reconnect resets the ramp to the minimum (set at connect).
+    eq._bright.reset()
+    assert eq._bright.value == 50
+    # current_brightness follows the ramp.
+    eq._bright._value = 80
+    assert eq.current_brightness == 80
 
 
 def test_cli_attack_and_release_flags():

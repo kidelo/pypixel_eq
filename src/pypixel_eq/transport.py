@@ -284,6 +284,11 @@ class Device:
         # link-layer round trip costs little and keeps the radio healthy.
         self.client = self._open_client(brightness)
         self._sender = _PayloadSender(self._write_payload, self.queue_size)
+        # A second writer for the panel brightness command: one BLE write
+        # per change (the ramp throttles these to actual steps), and it
+        # rides its own latest-wins slot so it can never be dropped by the
+        # frame queue. It shares the client/session (and the error path).
+        self._bright_sender = _PayloadSender(self._write_brightness, 1)
 
     def _open_client(self, brightness=0):
         """Open a fresh client, read the panel size, blank the display.
@@ -311,6 +316,14 @@ class Device:
 
     def _write_payload(self, payload):
         """Blocking write of one full-frame payload (runs on the writer)."""
+        self._execute(payload)
+
+    def _write_brightness(self, percent):
+        """Blocking write of one panel brightness command (its writer)."""
+        self._execute(brightness_payload(percent))
+
+    def _execute(self, payload):
+        """One no-ACK command over the shared session (writer thread)."""
         client, session = self.client, self._session
         if client is None or session is None:
             raise ConnectionError("device is closed")
@@ -331,12 +344,13 @@ class Device:
         A fresh ``Client`` (rather than reusing a wedged session) is the
         reliable recovery path: the old event-loop thread is left to its
         atexit cleanup and the new client starts from a clean state. The
-        writer is stopped before the old link closes and restarted after
+        writers are stopped before the old link closes and restarted after
         the new one is up, so no frame is ever written to a dead session.
         """
         self.close()
         self.client = self._open_client(self.brightness)
         self._sender = _PayloadSender(self._write_payload, self.queue_size)
+        self._bright_sender = _PayloadSender(self._write_brightness, 1)
 
     def update(self, payload):
         """Queue one full-frame payload; returns immediately.
@@ -349,6 +363,19 @@ class Device:
         if not payload or self.client is None or self._sender is None:
             return
         self._sender.push(payload)
+
+    def push_brightness(self, percent):
+        """Queue a panel brightness command (0..100); returns immediately.
+
+        Runs on its own background writer (one write per actual change -
+        the caller only calls this when the ramp stepped), so it is not
+        throttled by the frame rate and cannot be dropped by the frame
+        queue. A failed write is re-raised on the next call, so the
+        reconnect path still runs on the analysis thread.
+        """
+        if self.client is None or self._bright_sender is None:
+            return
+        self._bright_sender.push(percent)
 
     @property
     def send_ms(self):
@@ -368,6 +395,9 @@ class Device:
         sender, self._sender = self._sender, None
         if sender is not None:
             sender.stop()
+        bright_sender, self._bright_sender = self._bright_sender, None
+        if bright_sender is not None:
+            bright_sender.stop()
         client, self.client = self.client, None
         self._session = None
         if client is None:

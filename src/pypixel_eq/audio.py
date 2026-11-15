@@ -26,6 +26,11 @@ DB_FLOOR = -70.0        # mapped to level 0
 DB_CEIL = -20.0         # mapped to level 15
 ATTACK  = 0.001         # seconds to rise to a new level
 RELEASE = 0.050         # seconds to fall
+LLOUD_FLOOR = -50.0     # loudness (dBFS) read as the minimum brightness
+LLOUD_CEIL  = -3.0      # loudness (dBFS) read as the maximum brightness
+BATTACK = 0.100         # seconds for the brightness to rise
+BRELEASE = 0.500        # seconds for the brightness to fall
+BSTEP = 4.0             # panel brightness must move this far (%) before a write
 
 
 def find_loopback_input(p):
@@ -225,3 +230,105 @@ def analyze_frame(mono, masks, full_scale, stat="peak"):
             band = float(np.max(mag[mask])) / full_scale
         out.append(20.0 * float(np.log10(band + 1e-9)))
     return out
+
+
+def loudness_db(mono):
+    """Overall level of one window in dBFS (0 dBFS = full scale).
+
+    The plain RMS of the samples: a full-scale sine reads -3 dBFS,
+    silence at the noise floor. This is the signal the brightness
+    follows; it is independent of the band statistic, the tilt and the
+    auto-gain, so the panel brightness stays meaningful while the bar
+    mapping changes.
+    """
+    rms = float(np.sqrt(np.mean(mono ** 2)))
+    return 20.0 * float(np.log10(rms + 1e-9))
+
+
+def _brightness_from_db(db, bmin, bmax):
+    """One-segment mapping of a level (dBFS) to a panel brightness.
+
+    ``LLOUD_FLOOR`` -> ``bmin``, ``LLOUD_CEIL`` -> ``bmax``: quiet is
+    dim, loud is bright, and the two edges clamp. ``bmin == bmax`` is
+    a constant brightness (the ramp then never sends), which is the
+    unchanged static behaviour.
+    """
+    if bmin == bmax:
+        return float(bmin)
+    t = (db - LLOUD_FLOOR) / (LLOUD_CEIL - LLOUD_FLOOR)
+    t = max(0.0, min(1.0, t))
+    return bmin + (bmax - bmin) * t
+
+
+class BrightnessRamp:
+    """Smooth the panel brightness between a minimum and a maximum.
+
+    The panel's brightness is one 5-byte BLE write, so it must not be
+    re-sent on every analysis frame. This tracker smooths the level
+    (dBFS) with attack/release and maps it to ``bmin``..``bmax``, but
+    it only *returns a brightness to send* when the smoothed value has
+    moved at least ``step`` (default 4 %) away from the last value
+    that was actually sent - the panel holds whatever it has, so
+    between writes it stays at the previous level and the internal
+    ramp keeps interpolating. A quiet passage holds its value, a loud
+    one steps up only as far as the level demands.
+
+    ``bmin`` is the brightness at a quiet level (``LLOUD_FLOOR``
+    dBFS) and ``bmax`` the one at a loud one (``LLOUD_CEIL`` dBFS):
+    the two ends of the mapping. The device is set to ``bmin`` at
+    connect and after every reconnect (the panel keeps its last
+    display across links), and the ramp starts there, so the first
+    frame neither dips nor jumps. ``bmin == bmax`` is the static
+    case: the brightness is constant and the ramp never sends.
+    """
+
+    def __init__(self, bmin, bmax, attack=BATTACK, release=BRELEASE,
+                 step=BSTEP):
+        bmin = int(round(float(bmin)))
+        bmax = int(round(float(bmax)))
+        if not (0 <= bmin <= 100 and 0 <= bmax <= 100):
+            raise ValueError("brightness must be 0..100")
+        if bmin > bmax:
+            raise ValueError("bmin must be <= bmax")
+        self.bmin = bmin
+        self.bmax = bmax
+        if attack <= 0 or release <= 0:
+            raise ValueError("attack and release must be > 0")
+        if step < 0:
+            raise ValueError("step must be >= 0")
+        self.attack = attack
+        self.release = release
+        self.step = float(step)
+        self._level = LLOUD_FLOOR  # start at the quiet level, not dark
+        self._value = bmin         # the brightness sent to the panel
+
+    @property
+    def value(self):
+        """The brightness currently at the panel (0..100)."""
+        return self._value
+
+    def reset(self):
+        """Return to the start state (used after a reconnect, when a fresh
+        device is set to the minimum brightness at connect)."""
+        self._level = LLOUD_FLOOR
+        self._value = self.bmin
+
+    def update(self, dt, db):
+        """Consume one frame's level (dBFS); return the brightness to
+        send, or None when the panel does not need an update (the
+        smoothed value moved less than ``step`` from the last one sent)."""
+        if self.bmin == self.bmax:
+            return None
+        if db > self._level:
+            k = min(1.0, dt / self.attack)
+            self._level += (db - self._level) * k
+        else:
+            k = min(1.0, dt / self.release)
+            self._level += (db - self._level) * k
+        target = int(round(_brightness_from_db(self._level, self.bmin,
+                                               self.bmax)))
+        target = max(0, min(100, target))
+        if abs(target - self._value) >= self.step:
+            self._value = target
+            return target
+        return None

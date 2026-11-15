@@ -87,7 +87,7 @@ class EQGui:
         # Show the emulated panel at the brightness the real one runs at:
         # the panel dims itself, so the sent frame is untouched.
         scale = max(1, min(512 // img.width, 128 // img.height))
-        scaled = dim_image(img, self.eq.brightness).resize(
+        scaled = dim_image(img, self.eq.current_brightness).resize(
             (img.width * scale, img.height * scale), Image.NEAREST)
         self._dev_photo = ImageTk.PhotoImage(scaled, master=self.root)
         self.dev.itemconfig(self._dev_item, image=self._dev_photo)

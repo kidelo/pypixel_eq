@@ -27,8 +27,8 @@ import numpy as np
 from .audio import (
     SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI, DB_FLOOR, DB_CEIL,
     ATTACK, RELEASE,
-    AutoCeiling, band_centers, find_loopback_input, make_band_masks,
-    levels_from_db, tilt_db, analyze_frame,
+    AutoCeiling, band_centers, BrightnessRamp, find_loopback_input,
+    loudness_db, make_band_masks, levels_from_db, tilt_db, analyze_frame,
 )
 from .transport import Device, png_payload, render_image, rhythm_payload
 
@@ -55,7 +55,9 @@ class Equalizer:
     def __init__(self, address=None, width=64, height=16, transport="png",
                  rhythm_style=0, send_hz=0.0, auto_gain=True,
                  gain_window=5.0, gain_percentile=100.0, band_stat="peak",
-                 tilt=0.0, brightness=100, overlap=0, queue_size=1,
+                 tilt=0.0, brightness_min=100, brightness_max=100,
+                 brightness_mode="static",
+                 overlap=0, queue_size=1,
                  write_with_response=True,
                  attack=ATTACK, release=RELEASE):
         self.address = address
@@ -131,11 +133,28 @@ class Equalizer:
                                self.tilt)
         # Panel brightness (0..100), set at connect and after every
         # reconnect (the panel keeps its last display across links).
-        # 100 = the panel's own default, so it is the unchanged behaviour.
-        brightness = int(brightness)
-        if not 0 <= brightness <= 100:
+        # 100/100 = the panel's own default, so it is the unchanged
+        # behaviour. The minimum is the static value and the floor the
+        # auto mode maps quiet levels to; the maximum is the ceiling
+        # the auto mode maps loud levels to.
+        brightness_min = int(brightness_min)
+        brightness_max = int(brightness_max)
+        if not 0 <= brightness_min <= 100:
             raise ValueError("brightness must be 0..100")
-        self.brightness = brightness
+        if not 0 <= brightness_max <= 100:
+            raise ValueError("brightness must be 0..100")
+        self.brightness = brightness_min
+        self.brightness_max = brightness_max
+        if brightness_mode not in ("static", "auto"):
+            raise ValueError(
+                "brightness_mode must be 'static' or 'auto'")
+        self.brightness_mode = brightness_mode
+        # The ramp smooths the brightness and only emits a value when it
+        # moved far enough; the device is set to the minimum at connect,
+        # so the ramp starts there and the first frame neither dips nor
+        # jumps. In the static mode it is never fed (the panel holds the
+        # connect value).
+        self._bright = BrightnessRamp(brightness_min, brightness_max)
 
     def start(self, test=False):
         self._test = test
@@ -258,6 +277,42 @@ class Equalizer:
     def _mark_sent(self):
         self._last_send = time.perf_counter()
 
+    def _send_bright(self, dev, buf):
+        """Feed the brightness ramp with this window's loudness.
+
+        In the auto mode the ramp maps the overall level between the
+        minimum and maximum and only returns a new value when it has
+        moved far enough (a step), so a brightness write is one 5-byte
+        command per actual step - quiet passages hold the last value,
+        loud ones step up. In the static mode the ramp is never fed and
+        the panel holds the connect value. A failed write is re-raised
+        by ``push_brightness`` on the next call, so the reconnect path
+        still runs on the analysis thread.
+        """
+        if dev is None or self.brightness_mode != "auto":
+            return dev
+        to_send = self._bright.update(self.dt, loudness_db(buf))
+        if to_send is None:
+            return dev
+        try:
+            dev.push_brightness(to_send)
+            self._put_note(f"brightness -> {to_send}%")
+        except Exception as e:
+            self._put_note(f"brightness send failed ({e}) - reconnecting")
+            return self._reconnect(dev)
+        return dev
+
+    @property
+    def current_brightness(self):
+        """The panel brightness the view should show (0..100).
+
+        The auto mode follows the ramp (which tracks the loudness);
+        otherwise the fixed connect value (the minimum).
+        """
+        if self.brightness_mode == "auto":
+            return self._bright.value
+        return self.brightness
+
     def _connect_device(self):
         """Connect to the configured panel, or return None (display only)."""
         if not self.address:
@@ -273,6 +328,9 @@ class Equalizer:
             self._put_note(f"connect failed ({e}) - display only")
             return None
         self.width, self.height = dev.width, dev.height
+        # The device was set to the minimum at connect: re-sync the ramp
+        # (auto mode), which otherwise still holds its last value.
+        self._bright.reset()
         self._put_note(
             f"connected ({self.width}x{self.height}, "
             f"{self.transport} transport)")
@@ -304,6 +362,8 @@ class Equalizer:
                 delay = min(delay * 2.0, 10.0)
                 continue
             self.width, self.height = new.width, new.height
+            # The link is fresh and set to the minimum: re-sync the ramp.
+            self._bright.reset()
             self._put_note(f"reconnected ({self.width}x{self.height})")
             return new
         if dev is not None:
@@ -400,6 +460,7 @@ class Equalizer:
                 img, n_points, payload = self._payload(levels, mag_db)
 
                 dev, send_ms = self._send(dev, payload)
+                dev = self._send_bright(dev, buf)
                 if send_ms is not None:
                     now = time.time()
                     if now - t_last >= 2.0:
@@ -470,6 +531,7 @@ class Equalizer:
                 img, n_points, payload = self._payload(levels, mag_db)
 
                 dev, send_ms = self._send(dev, payload)
+                dev = self._send_bright(dev, buf)
                 if send_ms is not None:
                     now = time.time()
                     if now - t_last >= 2.0:

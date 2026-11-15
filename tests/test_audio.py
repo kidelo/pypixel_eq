@@ -8,6 +8,7 @@ from pypixel_eq import audio
 from pypixel_eq.audio import (
     SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI, DB_FLOOR, DB_CEIL,
     AutoCeiling, make_band_masks, analyze_frame, levels_from_db,
+    loudness_db,
 )
 
 
@@ -318,3 +319,76 @@ def test_hann_window_is_cached():
     b = audio._hann(FRAME)
     assert a is b
     assert len(a) == FRAME
+
+
+def test_loudness_db_tracks_the_level():
+    """loudness_db is the overall window RMS in dBFS: silence at the
+    floor, a full-scale sine near -3 dBFS, +20 dB at 10x amplitude."""
+    quiet = np.zeros(FRAME)
+    t = np.arange(FRAME) / SAMPLE_RATE
+    sine = 0.5 * np.sin(2 * np.pi * 440.0 * t)  # rms 0.3536 -> -9.0 dBFS
+    full = np.sin(2 * np.pi * 440.0 * t)        # rms 0.7071 -> -3.0 dBFS
+    assert loudness_db(quiet) < -120
+    assert loudness_db(sine) == pytest.approx(-9.0, abs=0.05)
+    assert loudness_db(full) == pytest.approx(-3.0, abs=0.05)
+    # 10x amplitude is +20 dBFS.
+    assert loudness_db(full * 10.0) == pytest.approx(17.0, abs=0.05)
+
+
+def test_brightness_mapping_is_one_segment_between_min_and_max():
+    """The mapping is linear between the two ends: floor -> bmin,
+    ceil -> bmax, clamped outside. bmin == bmax is a constant."""
+    from pypixel_eq.audio import LLOUD_FLOOR, LLOUD_CEIL
+    f = audio._brightness_from_db
+    # Floor -> min, ceil -> max.
+    assert f(LLOUD_FLOOR, 20, 100) == pytest.approx(20.0)
+    assert f(LLOUD_CEIL, 20, 100) == pytest.approx(100.0)
+    # The midpoint maps to the midpoint of the range.
+    assert f((LLOUD_FLOOR + LLOUD_CEIL) / 2, 20, 100) == pytest.approx(60.0)
+    # Clamped below and above.
+    assert f(LLOUD_FLOOR - 20, 20, 100) == pytest.approx(20.0)
+    assert f(LLOUD_CEIL + 20, 20, 100) == pytest.approx(100.0)
+    # A constant range (min == max) is the static case.
+    assert f(LLOUD_FLOOR, 50, 50) == 50.0
+    assert f(LLOUD_CEIL, 50, 50) == 50.0
+
+
+def test_brightness_ramp_starts_at_the_minimum():
+    """The ramp starts at the minimum (the value set at connect), so the
+    first frame neither dips nor jumps."""
+    ramp = audio.BrightnessRamp(30, 100)
+    assert ramp.value == 30
+    # A quiet level maps to the minimum and is a no-op.
+    assert ramp.update(0.04, audio.LLOUD_FLOOR) is None
+    assert ramp.value == 30
+
+
+def test_brightness_ramp_only_steps_when_far_enough():
+    """A brightness write happens only when the smoothed level has moved
+    at least ``step`` from the last value sent (the panel holds the rest)."""
+    ramp = audio.BrightnessRamp(50, 100, step=10.0)
+    # Loud: the level rises to the ceiling, a big step from the min -> send.
+    assert ramp.update(1.0, audio.LLOUD_CEIL) == 100
+    # A small further rise is absorbed (no write).
+    assert ramp.update(0.5, audio.LLOUD_CEIL) is None
+    # Quiet again: the level falls toward the minimum (a step).
+    assert ramp.update(2.0, -140.0) == 50
+    assert ramp.value == 50
+
+
+def test_brightness_ramp_attack_is_faster_than_release():
+    """Rising brightness catches up in ~1 attack, falling in ~1 release
+    (both in seconds, so the value is time-correct at any --overlap).
+    step=0 here isolates the timing (every update sends)."""
+    ramp = audio.BrightnessRamp(0, 100, step=0.0)
+    # Full-scale audio drives the target toward 100 %; a full attack time
+    # (0.2 s at the 0.1 s default) lands at the ceiling.
+    ramp.update(0.2, -1.0)
+    assert ramp.value == 100
+    # Silence: 0.085 s of release (0.5 s default) moves only part of the
+    # way, so it has fallen below the top but not all the way to 0.
+    ramp.update(0.085, -140.0)
+    assert 0 < ramp.value < 100
+    # A full release time lands at the floor.
+    ramp.update(2.0, -140.0)
+    assert ramp.value == 0
