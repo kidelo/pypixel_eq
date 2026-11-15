@@ -29,9 +29,9 @@ ATTACK  = 0.001         # seconds to rise to a new level
 RELEASE = 0.050         # seconds to fall
 LLOUD_FLOOR = -50.0     # loudness (dBFS) read as the minimum brightness
 LLOUD_CEIL  = -3.0      # loudness (dBFS) read as the maximum brightness
-BATTACK = 0.100         # seconds for the brightness to rise
-BRELEASE = 0.500        # seconds for the brightness to fall
-BSTEP = 4.0             # panel brightness must move this far (%) before a write
+BATTACK = 0.010         # seconds for the brightness to rise
+BRELEASE = 0.750        # seconds for the brightness to fall
+BSTEP = 10.0            # panel brightness must move this far (%) before a write
 # Kick detection (bass mode): a high-rate onset detector, decoupled from the
 # 2048-sample band analysis. The window is the analysis frame (so the bass
 # is resolved and a sustained drone is edge-only), but it is stepped at a
