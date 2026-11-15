@@ -54,8 +54,8 @@ class Equalizer:
 
     def __init__(self, address=None, width=64, height=16, transport="png",
                  rhythm_style=0, send_hz=0.0, auto_gain=True,
-                 gain_window=5.0, gain_percentile=100.0, overlap=0,
-                 queue_size=1, write_with_response=True,
+                 gain_window=5.0, gain_percentile=100.0, band_stat="peak",
+                 overlap=0, queue_size=1, write_with_response=True,
                  attack=ATTACK, release=RELEASE):
         self.address = address
         self.width = width
@@ -115,6 +115,12 @@ class Equalizer:
         self.gain_percentile = gain_percentile
         self._auto = AutoCeiling(self.dt, window_s=gain_window,
                                  percentile=gain_percentile)
+        # Per-band value: "peak" (loudest bin, the original behaviour) or
+        # "rms" (total band power: steadier bars, broadband content - noise,
+        # cymbals - lifts the wide upper bands). Validated by analyze_frame.
+        if band_stat not in ("peak", "rms"):
+            raise ValueError("band_stat must be 'peak' or 'rms'")
+        self.band_stat = band_stat
 
     def start(self, test=False):
         self._test = test
@@ -183,6 +189,11 @@ class Equalizer:
             self._work_test()
         else:
             self._work_live()
+
+    def _analyze(self, buf, masks, full_scale):
+        """Per-band dB of the current window, using the configured band
+        statistic (peak or rms)."""
+        return analyze_frame(buf, masks, full_scale, stat=self.band_stat)
 
     def _levels(self, mag_db, state):
         """Frame levels, applying auto-gain when enabled.
@@ -364,7 +375,7 @@ class Equalizer:
                     amp = 10.0 ** (db / 20.0)
                     new += amp * np.sin(2 * np.pi * freqs[b] * ts)
                 buf[FRAME - to_read:] = new
-                mag_db = analyze_frame(buf, masks, full_scale)
+                mag_db = self._analyze(buf, masks, full_scale)
                 levels = self._levels(mag_db, state)
                 img, n_points, payload = self._payload(levels, mag_db)
 
@@ -434,7 +445,7 @@ class Equalizer:
                     mono = samples
                 buf[FRAME - to_read:] = mono[:to_read]
                 n_read += to_read
-                mag_db = analyze_frame(buf, masks, full_scale)
+                mag_db = self._analyze(buf, masks, full_scale)
                 levels = self._levels(mag_db, state)
                 img, n_points, payload = self._payload(levels, mag_db)
 

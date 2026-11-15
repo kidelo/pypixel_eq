@@ -146,6 +146,36 @@ def test_cli_gain_percentile_flag():
     assert Equalizer(gain_percentile=custom.gain_percentile)._auto._percentile == 95.0
 
 
+def test_invalid_band_stat_rejected():
+    with pytest.raises(ValueError):
+        Equalizer(band_stat="mean")
+
+
+def test_engine_bands_use_the_configured_stat():
+    """The engine's analysis step uses --band-stat: rms reads a broadband
+    frame higher than peak in the wide upper band."""
+    rng = np.random.default_rng(2)
+    mono = rng.normal(size=equalizer.FRAME) * 0.05
+    edges, masks = audio.make_band_masks(audio.SAMPLE_RATE, equalizer.FRAME,
+                                         N_BANDS, audio.BAND_LO, audio.BAND_HI)
+    full_scale = equalizer.FRAME / 2.0
+    rms = Equalizer(band_stat="rms")._analyze(mono, masks, full_scale)
+    peak = Equalizer()._analyze(mono, masks, full_scale)
+    assert rms[-1] - peak[-1] > 9.0
+    assert rms[:2] == pytest.approx(peak[:2])
+
+
+def test_cli_band_stat_flag():
+    """--band-stat defaults to peak (the existing behaviour) and is
+    forwarded to the engine."""
+    from pypixel_eq.__main__ import build_parser
+    args = build_parser().parse_args([])
+    assert args.band_stat == "peak"
+    custom = build_parser().parse_args(["--band-stat", "rms"])
+    assert custom.band_stat == "rms"
+    assert Equalizer(band_stat=custom.band_stat).band_stat == "rms"
+
+
 def test_cli_attack_and_release_flags():
     """--attack/--release default to the module tunables and are forwarded."""
     from pypixel_eq.__main__ import build_parser

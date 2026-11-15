@@ -158,18 +158,46 @@ def _hann(length):
     return win
 
 
-def analyze_frame(mono, masks, full_scale):
-    """Return per-band peak dB for one mono frame (mono in [-1,1]).
+def analyze_frame(mono, masks, full_scale, stat="peak"):
+    """Return per-band dB for one mono frame (mono in [-1,1]).
 
     ``mono`` is one analysis window, ``masks`` from :func:`make_band_masks`,
     ``full_scale`` the FFT full-scale reference (FRAME / 2 for int16 audio).
+
+    ``stat`` selects the band value: ``"peak"`` (default) is the loudest
+    bin, which tracks the strongest component and is what a single tone
+    calibrates to. ``"rms"`` is the band RMS scaled by the band width:
+    ``sqrt(sum(|X|**2))`` = ``sqrt(n_bins) * sqrt(mean(|X|**2))``.
+
+    That definition matters. The bare mean (RMS per bin) would make the
+    wide upper bands read down to 23 dB lower than a one-bin band, so a
+    tone would change height just by moving up in frequency; the width
+    factor is what a filterbank calls area normalization and keeps a tone
+    calibrated in every band (the RMS lands 1.8..3 dB above the peak,
+    because it also collects the window's main-lobe leakage). It is also
+    the physically correct band level: a flat-in-Hz spectrum (white noise)
+    carries more power in a wide band and rises 3 dB per octave, while
+    pink noise (equal energy per octave, what music approximates) comes
+    out flat. A hand-tuned "pink" gain table is what the same correction
+    looks like in projects that take a plain bin mean; here it follows from
+    the band width, so do not apply both.
+
+    The gain is temporal: a tone whose position between bins drifts swings
+    the peak by ~0.4 dB (scalloping) and the RMS by 0.0 dB, because the
+    energy stays inside the band; pink noise jitters 1.4 dB (peak) versus
+    1.0 dB (rms).
     """
+    if stat not in ("peak", "rms"):
+        raise ValueError("band stat must be 'peak' or 'rms'")
     mag = np.abs(np.fft.rfft(mono * _hann(len(mono))))
     out = []
     for mask in masks:
         if not mask.any():
             out.append(DB_FLOOR)
             continue
-        peak = float(np.max(mag[mask]) / full_scale)
-        out.append(20.0 * float(np.log10(peak + 1e-9)))
+        if stat == "rms":
+            band = float(np.sqrt(np.sum(mag[mask] ** 2))) / full_scale
+        else:
+            band = float(np.max(mag[mask])) / full_scale
+        out.append(20.0 * float(np.log10(band + 1e-9)))
     return out

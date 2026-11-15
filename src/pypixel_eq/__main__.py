@@ -6,6 +6,7 @@ Run:
                          [--transport png|rhythm] [--rhythm-style 0]
                          [--fps F] [--overlap N] [--queue N]
                          [--attack S] [--release S] [--gain-percentile P]
+                         [--band-stat peak|rms]
                          [--no-response] [--test] [--verbose]
 
   -a <MAC>            send to the panel
@@ -29,6 +30,9 @@ Run:
                       level 15: 100 = the maximum (default), 95 ignores
                       the loudest 5 % of frames so a single hit no longer
                       squashes every bar
+  --band-stat MODE    per-band value: peak (default, the loudest bin) or
+                      rms (total band power: steadier bars, broadband
+                      content lifts the wide upper bands)
   --no-response       write BLE chunks without a link-layer response
                       (experiment: lower latency, less reliable)
   --test              feed a synthetic 11-band stimulus instead of
@@ -114,6 +118,12 @@ def build_parser():
                              "(default 100 = the maximum; 95 ignores the "
                              "loudest 5 %% of frames so a single transient "
                              "no longer squashes every bar)")
+    parser.add_argument("--band-stat", choices=("peak", "rms"),
+                        default="peak",
+                        help="per-band value: peak (default, the loudest bin, "
+                             "tracks the strongest component) or rms (total "
+                             "band power: steadier bars, broadband content "
+                             "lifts the wide upper bands)")
     parser.add_argument("--test", action="store_true",
                         help="feed a synthetic 11-band stimulus instead of "
                              "capturing system audio (no audio device needed)")
@@ -158,6 +168,7 @@ def main():
                    rhythm_style=args.rhythm_style, send_hz=send_hz,
                    auto_gain=args.auto_gain, gain_window=args.gain_window,
                    gain_percentile=args.gain_percentile,
+                   band_stat=args.band_stat,
                    overlap=args.overlap, queue_size=args.queue,
                    write_with_response=args.write_with_response,
                    attack=args.attack, release=args.release)

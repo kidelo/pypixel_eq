@@ -49,6 +49,77 @@ def test_single_tone_peaks_in_its_own_band():
         assert peak == b, f"tone {freq:.0f} Hz peaked in band {peak}, not {b}: {mag_db}"
 
 
+def test_band_stat_rms_is_invariant_to_bin_alignment():
+    """The peak jumps when a tone drifts between bins (scalloping); the RMS
+    sums the band's energy and stays put. Measured: ~0.4 dB vs 0.0 dB."""
+    edges, masks = make_band_masks(SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI)
+    full_scale = FRAME / 2.0
+    t = np.arange(FRAME) / SAMPLE_RATE
+    band = 6  # 655..1172 Hz, 23 bins
+    peaks, rms = [], []
+    for k in range(40):
+        freq = 1000.0 + 40.0 * (k / 39.0 - 0.5)  # +/-20 Hz inside the band
+        mono = 0.5 * np.sin(2 * np.pi * freq * t + k)
+        peaks.append(analyze_frame(mono, masks, full_scale)[band])
+        rms.append(analyze_frame(mono, masks, full_scale, stat="rms")[band])
+    assert np.std(rms) < 0.01
+    assert np.std(peaks) > 0.1
+    # Same level on average (within ~2.2 dB: the RMS also collects the
+    # window's main-lobe leakage, the peak only its loudest bin).
+    assert np.mean(rms) == pytest.approx(np.mean(peaks), abs=3.0)
+
+
+def test_band_stat_rms_keeps_a_tone_calibration():
+    """rms = total band power. A tone's energy sits in one bin, so its own
+    band reads almost the same as peak (within ~3 dB, the Hann leakage
+    of the neighbouring bins); it is NOT lowered by the band width."""
+    edges, masks = make_band_masks(SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI)
+    full_scale = FRAME / 2.0
+    t = np.arange(FRAME) / SAMPLE_RATE
+    for b in range(N_BANDS):
+        freq = (edges[b] * edges[b + 1]) ** 0.5
+        mono = 0.5 * np.sin(2 * np.pi * freq * t)
+        peak = analyze_frame(mono, masks, full_scale)
+        rms = analyze_frame(mono, masks, full_scale, stat="rms")
+        assert rms[b] >= peak[b]
+        assert rms[b] - peak[b] < 6.0, (b, peak[b], rms[b])
+
+
+def test_band_stat_rms_lifts_broadband_upper_bands():
+    """White noise fills every bin: rms sums them, so the wide upper bands
+    read much higher than their single loudest bin, while a one-bin band
+    (band 1) is unchanged."""
+    edges, masks = make_band_masks(SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI)
+    full_scale = FRAME / 2.0
+    rng = np.random.default_rng(0)
+    mono = rng.normal(size=FRAME) * 0.05
+    peak = analyze_frame(mono, masks, full_scale)
+    rms = analyze_frame(mono, masks, full_scale, stat="rms")
+    # One bin per band: identical.
+    assert rms[0] == pytest.approx(peak[0])
+    assert rms[1] == pytest.approx(peak[1])
+    # 225 bins: total power is ~10 dB above the loudest single bin.
+    assert rms[-1] - peak[-1] > 9.0
+    # The lift grows with the band width (not strictly, the loudest bin is
+    # random): narrow bands ~unchanged, top bands far above.
+    deltas = [rms[i] - peak[i] for i in range(N_BANDS)]
+    assert deltas[2] < 1.0
+    assert deltas[5] < deltas[-1] - 5.0
+
+
+def test_band_stat_default_is_the_peak_path():
+    """The default stays byte-identical (peak), and an unknown stat is
+    rejected instead of silently falling back."""
+    edges, masks = make_band_masks(SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI)
+    rng = np.random.default_rng(1)
+    mono = rng.normal(size=FRAME) * 0.05
+    assert analyze_frame(mono, masks, FRAME / 2.0) == analyze_frame(
+        mono, masks, FRAME / 2.0, stat="peak")
+    for bad in ("", "mean", "RMS"):
+        with pytest.raises(ValueError):
+            analyze_frame(mono, masks, FRAME / 2.0, stat=bad)
+
+
 def test_quiet_frame_maps_to_level_zero():
     """A near-silent frame maps every band to level 0."""
     edges, masks = make_band_masks(SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI)

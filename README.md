@@ -100,6 +100,45 @@ system audio ─► WASAPI/monitor ─► Hann-windowed FFT (2048) ─► 11 ban
       ─► render (png only) ─► payload ─► background writer ─► BLE
 ```
 
+### Band value (`--band-stat peak|rms`, default `peak`)
+
+Each band is reduced to one dB value. `peak` (the default) takes the loudest
+bin: it tracks the strongest single component and is what a tone calibrates
+to, but it jumps between bins from frame to frame. `rms` takes the band's
+root-sum-square of power, `sqrt(sum(|X|²))`, which is the RMS per bin times
+the band's width (`sqrt(n_bins) * sqrt(mean(|X|²))`).
+
+The width factor is the part that is easy to get wrong. A plain mean over
+the bins would make the wide upper bands read up to 23 dB lower than a
+two-bin band, so the same tone would shrink just by moving up in frequency;
+filterbanks call the correction area normalization and it keeps a tone
+calibrated everywhere (within 3 dB of the peak). It is also the physically
+correct band level: a flat-in-Hz spectrum (white noise) has more power in a
+wide band, so it rises 3 dB per octave, and pink noise - equal energy per
+octave, which is what music approximates - comes out flat.
+
+Measured on a 2048 window (bins per band 1,1,2,4,7,12,23,39,71,126,225):
+
+| signal | `peak` | `rms` |
+|---|---|---|
+| tone, own band | reference | +1.8…3.0 dB |
+| white noise (should rise 3 dB/oct) | flat (+7 dB over the range) | rise, +16 dB at the top |
+| pink noise (should be flat) | falls 16 dB | flat (0.8 dB spread) |
+| tone drifting between bins | 0.4 dB jitter | 0.0 dB jitter |
+| pink noise, top band | 1.4 dB jitter | 1.0 dB jitter |
+
+So `rms` fixes the shape that `peak` gets wrong on music: with `peak`, pink
+noise - i.e. most music - falls ~16 dB from the low to the high bands, which
+is exactly the "the highs are always dead" complaint. Projects that take the
+plain bin mean instead of the band power compensate with a fixed per-band
+gain table tuned on pink noise (a "pink" table); `rms` is that correction,
+computed from the band width rather than hand-tuned, so applying such a table
+on top would double-count it. A taste curve (lift 60 Hz, tame 3 kHz) is a
+different feature.
+
+With `--no-auto-gain` the rhythm transport's energy fold also reads a few dB
+louder under `rms` (it uses the fixed span).
+
 ### Panel update rate (`--overlap` 0-2, default 0)
 
 The analysis loop re-analyzes a rolling 2048-sample window every
@@ -183,6 +222,7 @@ uv run python -m pypixel_eq --no-auto-gain --gain-window 10
 | `--auto-gain` / `--no-auto-gain` | Bars scale to the recent max over all bands (on by default). |
 | `--gain-window S` | Auto-gain history: seconds of "recent max" (default 2). |
 | `--gain-percentile P` | Which value of the gain window maps to level 15 (default 100 = max; 95 ignores the loudest 5 % of frames). |
+| `--band-stat peak\|rms` | Per-band value: `peak` (default, loudest bin) or `rms` (total band power: steadier, lifts broadband highs). |
 | `--test` | Synthetic 11-band stimulus (no audio device needed). |
 | `--verbose` | DEBUG logging (BLE traffic, sends, notifies). |
 
