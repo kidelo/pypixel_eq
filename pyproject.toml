@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pypixel-eq"
+version = "0.1.0"
+description = "Audio-reactive equalizer for the iPixel Color panel (pypixelcolor-fork-based)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+keywords = [
+  "equalizer",
+  "audio-visualizer",
+  "led",
+  "ble",
+  "bluetooth-low-energy",
+  "ipixel",
+  "music-visualizer",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Win32 (MS Windows)",
+  "Environment :: X11 Applications",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Sound/Audio",
+  "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+dependencies = [
+  # The pypixelcolor FORK (kidelo/pypixelcolor-ext), pinned by the git
+  # submodule in ./pypixelcolor. Not PyPI: the fork carries hardware-
+  # verified fixes (fire-and-forget set_fun_mode, write_with_response,
+  # pre-scan) that upstream has not released.
+  "pypixelcolor",
+  "numpy",
+  "Pillow",
+]
+
+[project.optional-dependencies]
+audio = [
+  "pyaudiowpatch",
+]
+dev = [
+  "pytest",
+]
+
+[tool.uv.sources]
+pypixelcolor = { path = "pypixelcolor" }
+
+[project.scripts]
+pypixel-eq = "pypixel_eq.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/kidelo/pypixel_eq"
+Issues = "https://github.com/kidelo/pypixel_eq/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pypixel_eq"]
+
+[tool.pytest.ini_options]
+# Only the project's own tests; the pypixelcolor submodule's tests run in
+# the fork's own CI. (They can still be run explicitly: `uv run pytest
+# pypixelcolor/tests`.)
+testpaths = ["tests"]

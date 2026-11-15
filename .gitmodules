@@ -1,0 +1,3 @@
+[submodule "pypixelcolor"]
+	path = pypixelcolor
+	url = https://github.com/kidelo/pypixelcolor-ext.git

@@ -1,0 +1,29 @@
+# Cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# Python build artifacts
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Editors
+.vscode/
+.idea/
+
+# Local scratch (never published)
+tmp/
+*.log
+.coverage
+local_test/
+.hints/
+.docs/
+
+# Tooling
+.pytest_cache/
+.DS_Store
