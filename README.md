@@ -139,6 +139,30 @@ different feature.
 With `--no-auto-gain` the rhythm transport's energy fold also reads a few dB
 louder under `rms` (it uses the fixed span).
 
+### Spectral tilt (`--tilt`, default 0)
+
+A fixed gain per band around a 1 kHz pivot: `gain = tilt * log2(f / 1000)`,
+clamped to ±12 dB per band. Positive is brighter (highs up, bass down),
+negative warmer. It is a taste curve on top of the band statistic, not a
+measurement correction — `--band-stat rms` already produces the correct band
+level, so a tilt here only sets the balance.
+
+Music is not flat: a balanced mix falls ~5 dB/octave from 100 Hz to 4 kHz.
+With `--band-stat rms` a music-like spectrum reads roughly level 14 in the
+bass and 10 in the highs, so ±1 dB/octave moves that balance by 2–3 level
+steps:
+
+| `--tilt` | effect |
+|---|---|
+| `0` | unchanged (default) |
+| `-1` | warmer: +5 dB at 30 Hz, −3 dB at 9 kHz |
+| `+1` | brighter: −5 dB at 30 Hz, +3 dB at 9 kHz |
+| `±6` | maximum slope, clamped at ±12 dB per band |
+
+The tilt is applied before the auto-gain ceiling, so the ceiling follows the
+shaped spectrum. With `--no-auto-gain` the rhythm transport's energy fold
+(the fixed -70/-20 dB span) also shifts with it.
+
 ### Panel update rate (`--overlap` 0-2, default 0)
 
 The analysis loop re-analyzes a rolling 2048-sample window every
@@ -223,6 +247,7 @@ uv run python -m pypixel_eq --no-auto-gain --gain-window 10
 | `--gain-window S` | Auto-gain history: seconds of "recent max" (default 2). |
 | `--gain-percentile P` | Which value of the gain window maps to level 15 (default 100 = max; 95 ignores the loudest 5 % of frames). |
 | `--band-stat peak\|rms` | Per-band value: `peak` (default, loudest bin) or `rms` (total band power: steadier, lifts broadband highs). |
+| `--tilt N` | Fixed spectral tilt in dB/octave around 1 kHz (default 0; positive = brighter, negative = warmer). |
 | `--test` | Synthetic 11-band stimulus (no audio device needed). |
 | `--verbose` | DEBUG logging (BLE traffic, sends, notifies). |
 

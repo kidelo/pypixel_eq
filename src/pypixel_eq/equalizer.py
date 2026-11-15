@@ -27,8 +27,8 @@ import numpy as np
 from .audio import (
     SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI, DB_FLOOR, DB_CEIL,
     ATTACK, RELEASE,
-    AutoCeiling, find_loopback_input, make_band_masks, levels_from_db,
-    analyze_frame,
+    AutoCeiling, band_centers, find_loopback_input, make_band_masks,
+    levels_from_db, tilt_db, analyze_frame,
 )
 from .transport import Device, png_payload, render_image, rhythm_payload
 
@@ -55,7 +55,7 @@ class Equalizer:
     def __init__(self, address=None, width=64, height=16, transport="png",
                  rhythm_style=0, send_hz=0.0, auto_gain=True,
                  gain_window=5.0, gain_percentile=100.0, band_stat="peak",
-                 overlap=0, queue_size=1, write_with_response=True,
+                 tilt=0.0, overlap=0, queue_size=1, write_with_response=True,
                  attack=ATTACK, release=RELEASE):
         self.address = address
         self.width = width
@@ -121,6 +121,13 @@ class Equalizer:
         if band_stat not in ("peak", "rms"):
             raise ValueError("band_stat must be 'peak' or 'rms'")
         self.band_stat = band_stat
+        # Fixed spectral tilt in dB/octave around 1 kHz (taste curve):
+        # positive = brighter. Zero is the unchanged behaviour.
+        if abs(float(tilt)) > 6.0:
+            raise ValueError("tilt must be within +/-6 dB per octave")
+        self.tilt = float(tilt)
+        self._tilt_db = tilt_db(band_centers(N_BANDS, BAND_LO, BAND_HI),
+                               self.tilt)
 
     def start(self, test=False):
         self._test = test
@@ -192,8 +199,11 @@ class Equalizer:
 
     def _analyze(self, buf, masks, full_scale):
         """Per-band dB of the current window, using the configured band
-        statistic (peak or rms)."""
-        return analyze_frame(buf, masks, full_scale, stat=self.band_stat)
+        statistic (peak or rms) and the fixed spectral tilt."""
+        mag_db = analyze_frame(buf, masks, full_scale, stat=self.band_stat)
+        if self.tilt:
+            mag_db = [db + gain for db, gain in zip(mag_db, self._tilt_db)]
+        return mag_db
 
     def _levels(self, mag_db, state):
         """Frame levels, applying auto-gain when enabled.

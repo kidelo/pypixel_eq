@@ -6,7 +6,7 @@ Run:
                          [--transport png|rhythm] [--rhythm-style 0]
                          [--fps F] [--overlap N] [--queue N]
                          [--attack S] [--release S] [--gain-percentile P]
-                         [--band-stat peak|rms]
+                         [--band-stat peak|rms] [--tilt DB_PER_OCT]
                          [--no-response] [--test] [--verbose]
 
   -a <MAC>            send to the panel
@@ -33,6 +33,10 @@ Run:
   --band-stat MODE    per-band value: peak (default, the loudest bin) or
                       rms (total band power: steadier bars, broadband
                       content lifts the wide upper bands)
+  --tilt N            fixed spectral tilt in dB per octave around 1 kHz
+                      (default 0). Positive = brighter (highs up, bass
+                      down), negative = warmer; clamped to +/-12 dB per
+                      band
   --no-response       write BLE chunks without a link-layer response
                       (experiment: lower latency, less reliable)
   --test              feed a synthetic 11-band stimulus instead of
@@ -124,6 +128,11 @@ def build_parser():
                              "tracks the strongest component) or rms (total "
                              "band power: steadier bars, broadband content "
                              "lifts the wide upper bands)")
+    parser.add_argument("--tilt", type=float, default=0.0,
+                        help="fixed spectral tilt in dB per octave around "
+                             "1 kHz (default 0; positive = brighter, highs up "
+                             "and bass down; negative = warmer; each band is "
+                             "clamped to +/-12 dB)")
     parser.add_argument("--test", action="store_true",
                         help="feed a synthetic 11-band stimulus instead of "
                              "capturing system audio (no audio device needed)")
@@ -155,6 +164,8 @@ def main():
         sys.exit("--attack must be > 0")
     if args.release <= 0:
         sys.exit("--release must be > 0")
+    if abs(args.tilt) > 6:
+        sys.exit("--tilt must be within +/-6 dB per octave")
     # Always log at INFO so a "BLE device disconnected" event is visible
     # without any flag; --verbose adds DEBUG (wire traffic, notifies).
     setup_logging("DEBUG" if args.verbose else "INFO")
@@ -168,7 +179,7 @@ def main():
                    rhythm_style=args.rhythm_style, send_hz=send_hz,
                    auto_gain=args.auto_gain, gain_window=args.gain_window,
                    gain_percentile=args.gain_percentile,
-                   band_stat=args.band_stat,
+                   band_stat=args.band_stat, tilt=args.tilt,
                    overlap=args.overlap, queue_size=args.queue,
                    write_with_response=args.write_with_response,
                    attack=args.attack, release=args.release)

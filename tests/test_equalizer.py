@@ -12,7 +12,7 @@ import pytest
 
 from pypixel_eq import audio
 from pypixel_eq import equalizer
-from pypixel_eq.audio import DB_FLOOR, DB_CEIL, N_BANDS
+from pypixel_eq.audio import DB_FLOOR, DB_CEIL, N_BANDS, BAND_LO, BAND_HI
 from pypixel_eq.equalizer import Equalizer, rhythm_levels_with_energy
 
 
@@ -174,6 +174,69 @@ def test_cli_band_stat_flag():
     custom = build_parser().parse_args(["--band-stat", "rms"])
     assert custom.band_stat == "rms"
     assert Equalizer(band_stat=custom.band_stat).band_stat == "rms"
+
+
+def test_tilt_curve_is_zero_without_tilt():
+    centers = audio.band_centers(N_BANDS, BAND_LO, BAND_HI)
+    assert audio.tilt_db(centers, 0.0) == [0.0] * N_BANDS
+    assert len(centers) == N_BANDS
+
+
+def test_tilt_curve_slopes_around_one_khz_and_clamps():
+    centers = audio.band_centers(N_BANDS, BAND_LO, BAND_HI)
+    gains = audio.tilt_db(centers, 1.0)
+    # Positive tilt = brighter: the bands rise with frequency.
+    assert gains == sorted(gains)
+    # The pivot (1 kHz) lies between band 6 (876 Hz) and band 7 (1568 Hz),
+    # so the nearest band is within one octave of 0 dB.
+    pivot_band = int(np.argmin([abs(np.log2(c / 1000.0)) for c in centers]))
+    assert abs(gains[pivot_band]) < 0.5
+    # One octave away is 1 dB at a slope of 1 dB/octave.
+    for c, g in zip(centers, gains):
+        octaves = np.log2(c / 1000.0)
+        assert g == pytest.approx(min(12.0, max(-12.0, octaves)), abs=1e-9)
+    # A steep slope is clamped instead of swamping the 50 dB span.
+    steep = audio.tilt_db(centers, 6.0)
+    assert max(steep) == pytest.approx(12.0)
+    assert min(steep) == pytest.approx(-12.0)
+
+
+def test_engine_tilt_is_applied_before_the_gain_tracker():
+    """--tilt shifts the per-band dB before auto-gain/levels, so the ceiling
+    follows the shaped spectrum; 0 leaves the analysis untouched."""
+    rng = np.random.default_rng(4)
+    mono = rng.normal(size=equalizer.FRAME) * 0.05
+    edges, masks = audio.make_band_masks(audio.SAMPLE_RATE, equalizer.FRAME,
+                                         N_BANDS, audio.BAND_LO, audio.BAND_HI)
+    full_scale = equalizer.FRAME / 2.0
+    flat = Equalizer()
+    warm = Equalizer(tilt=-1.0)
+    assert flat._analyze(mono, masks, full_scale) == \
+        audio.analyze_frame(mono, masks, full_scale)
+    shifted = warm._analyze(mono, masks, full_scale)
+    base = flat._analyze(mono, masks, full_scale)
+    gains = audio.tilt_db(audio.band_centers(N_BANDS, audio.BAND_LO,
+                                             audio.BAND_HI), -1.0)
+    assert shifted == pytest.approx([b + g for b, g in zip(base, gains)])
+    # A warm tilt lowers the top band and lifts the bass.
+    assert shifted[-1] < base[-1]
+    assert shifted[0] > base[0]
+
+
+def test_invalid_tilt_rejected():
+    for bad in (6.5, -7.0):
+        with pytest.raises(ValueError):
+            Equalizer(tilt=bad)
+
+
+def test_cli_tilt_flag():
+    """--tilt defaults to 0 (no change) and is forwarded to the engine."""
+    from pypixel_eq.__main__ import build_parser
+    args = build_parser().parse_args([])
+    assert args.tilt == 0.0
+    custom = build_parser().parse_args(["--tilt", "-1.5"])
+    assert custom.tilt == -1.5
+    assert Equalizer(tilt=custom.tilt).tilt == -1.5
 
 
 def test_cli_attack_and_release_flags():

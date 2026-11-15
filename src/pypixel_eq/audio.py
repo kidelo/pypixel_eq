@@ -70,6 +70,30 @@ def make_band_masks(sample_rate, frame, n_bands, lo, hi):
     return edges, masks
 
 
+def band_centers(n_bands, lo, hi):
+    """Geometric midpoints of the log-spaced bands (Hz), one per band."""
+    edges = np.geomspace(lo, hi, n_bands + 1)
+    return ((edges[:-1] * edges[1:]) ** 0.5).tolist()
+
+
+def tilt_db(centers, tilt, pivot=1000.0, max_db=12.0):
+    """Fixed per-band gain (dB) for a spectral tilt.
+
+    ``tilt`` is a slope in dB per octave, pivoting at ``pivot`` Hz: the
+    band at the pivot is unchanged, higher bands move by ``tilt`` per
+    octave above it, lower bands by the same amount per octave below (so
+    a positive tilt is brighter: highs up, bass down). ``max_db`` clamps
+    each band, because a linear slope over >5 octaves would otherwise
+    swamp the 50 dB span of the level mapping.
+
+    This is a taste curve, not a measurement correction: the band value
+    (peak/rms) already tracks the band width, so this only sets the
+    balance between bass, mids and highs.
+    """
+    return [max(-max_db, min(max_db, tilt * float(np.log2(c / pivot))))
+            for c in centers]
+
+
 def levels_from_db(mag_db, state, dt, ceil=DB_CEIL, attack=ATTACK,
                    release=RELEASE):
     """Map dB magnitudes to 0..15 levels with fast attack / slow release.
