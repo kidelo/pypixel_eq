@@ -392,3 +392,178 @@ def test_brightness_ramp_attack_is_faster_than_release():
     # A full release time lands at the floor.
     ramp.update(2.0, -140.0)
     assert ramp.value == 0
+
+
+# ----------------------------------------------------------------- bass mode
+
+SR = audio.SAMPLE_RATE
+
+
+def _kick_pulse(amp=0.8, freq=60.0):
+    """One kick: a fast-decaying 60 Hz hit (an onset, not a tone)."""
+    n = int(0.12 * SR)
+    t = np.arange(n) / SR
+    return amp * np.exp(-t / 0.035) * np.sin(2 * np.pi * freq * t)
+
+
+def _feed_chunks(sig, chunk=1024):
+    """Feed the detector in chunked pieces and collect the fire positions."""
+    det = audio.KickDetector(1.0)
+    fired = []
+    for i in range(0, len(sig), chunk):
+        if det.feed(sig[i:i + chunk]):
+            fired.append(i / SR)
+    return det, fired
+
+
+def test_kick_fires_once_on_a_single_hit():
+    """A single kick in silence fires exactly one flash (the refractory
+    collapses the multi-hop onset into a single fire)."""
+    sig = np.zeros(10 * SR)
+    s = int(5 * SR)
+    sig[s:s + len(_kick_pulse())] = _kick_pulse()
+    det, fired = _feed_chunks(sig)
+    # Exactly one fire, at the onset (the recorded time is the chunk start
+    # that contained the fire, so it is within one hop of the true onset).
+    assert len(fired) == 1
+    assert 4.9 <= fired[0] <= 5.05
+
+
+def test_kick_rejects_a_sustained_drone():
+    """A steady bass line (no onset) never fires: the flux of a constant
+    level is edge-only, so the adaptive threshold settles above it."""
+    t = np.arange(10 * SR) / SR
+    drone = 0.4 * np.sin(2 * np.pi * 50.0 * t)
+    det, fired = _feed_chunks(drone)
+    assert fired == []
+
+
+def test_kick_fires_on_a_hit_over_a_drone():
+    """A kick ON TOP of a steady bass line is the burst above the line:
+    it fires once, where the drone alone never does."""
+    t = np.arange(10 * SR) / SR
+    sig = 0.4 * np.sin(2 * np.pi * 50.0 * t)
+    s = int(5 * SR)
+    sig[s:s + len(_kick_pulse())] += _kick_pulse()
+    det, fired = _feed_chunks(sig)
+    # Exactly one fire, at the onset (the recorded time is the chunk start
+    # that contained the fire, so it is within one hop of the true onset).
+    assert len(fired) == 1
+    assert 4.9 <= fired[0] <= 5.05
+
+
+def test_kick_rejects_a_high_frequency_onset():
+    """A broadband attack OUT of the kick zone (3 kHz) must not fire:
+    only the lowest bins count, so a 3 kHz transient is outside the zone."""
+    sig = np.zeros(10 * SR)
+    n = 1000
+    sig[int(5 * SR):int(5 * SR) + n] = 0.5 * np.sin(
+        2 * np.pi * 3000.0 * np.arange(n) / SR)
+    det, fired = _feed_chunks(sig)
+    assert fired == []
+
+
+def test_kick_rejects_silence_and_faint_noise():
+    """Silence and a -40 dBFS noise floor never fire: the absolute flux
+    floor (KICK_FLOOR) is a noise gate below any real hit."""
+    rng = np.random.default_rng(0)
+    noise = 10 ** (-40.0 / 20.0) * rng.normal(size=10 * SR)
+    det, fired = _feed_chunks(noise)
+    assert fired == []
+    det, fired = _feed_chunks(np.zeros(10 * SR))
+    assert fired == []
+
+
+def test_kick_fires_once_per_hit_in_a_beat():
+    """A 120 BPM eight-hit run fires once per hit: the refractory (0.25 s)
+    is short enough to catch each kick, long enough to collapse one kick's
+    several hops into a single fire."""
+    t = np.arange(10 * SR) / SR
+    sig = 0.3 * np.sin(2 * np.pi * 50.0 * t)
+    kick = _kick_pulse()
+    for k in range(8):
+        s = int((2.5 + 0.5 * k) * SR)
+        sig[s:s + len(kick)] += kick
+    det, fired = _feed_chunks(sig)
+    assert len(fired) == 8
+    # One fire per hit, not one per hop.
+    assert all(fired[i + 1] - fired[i] >= 0.4 for i in range(7))
+
+
+def test_kick_sensitivity_scales_the_threshold():
+    """Higher sensitivity = a higher threshold = fewer flashes.
+
+    The threshold is ``KICK_DELTA * sensitivity * EMA + floor``: the
+    sensitivity scales the ADAPTIVE term, so it only discriminates over
+    an active bassline (where the EMA is non-zero), never in silence
+    (where the absolute floor rules). A soft kick on a drone fires at
+    the default but is rejected at a high sensitivity - the exact
+    "higher = fewer flashes" direction the flag promises."""
+    t = np.arange(10 * SR) / SR
+    drone = 0.4 * np.sin(2 * np.pi * 50.0 * t)
+    s = int(5 * SR)
+
+    def fires(amp, sens):
+        sig = drone.copy()
+        sig[s:s + len(_kick_pulse(amp))] += _kick_pulse(amp)
+        det = audio.KickDetector(sens)
+        n = 0
+        for i in range(0, len(sig), 1024):
+            if det.feed(sig[i:i + 1024]):
+                n += 1
+        return n
+
+    # A strong kick fires at the default.
+    assert fires(0.8, 1.0) >= 1
+    # A soft kick's onset sits in the threshold band: it fires at the
+    # default but is rejected at a high sensitivity (the threshold rose),
+    # while it still fires at a low sensitivity (the threshold fell).
+    assert fires(0.05, 1.0) == 1
+    assert fires(0.05, 3.0) == 0
+    assert fires(0.05, 0.5) >= 1
+
+
+def test_kick_detector_rejects_invalid_sensitivity():
+    for bad in (0, -1.0):
+        with pytest.raises(ValueError):
+            audio.KickDetector(bad)
+
+
+def test_kick_flash_snaps_to_peak_and_decays_to_base():
+    """trigger() snaps to the peak instantly (no attack ramp); update()
+    decays back to the base and only returns a value when it moved a full
+    step (KICK_STEP), holding in between."""
+    flash = audio.KickFlash(base=10, peak=100)
+    assert flash.value == 10  # starts at the base
+    assert flash.trigger() == 100  # instant snap to the peak
+    assert flash.value == 100
+    # Decay: the values are monotonically non-increasing back to the base.
+    seq = []
+    for _ in range(200):
+        v = flash.update(0.0427)  # one analysis hop
+        if v is not None:
+            seq.append(v)
+    assert seq, "the decay must send values"
+    assert seq[0] <= 100 and seq[-1] == 10  # ends exactly at the base
+    assert all(a >= b for a, b in zip(seq, seq[1:]))
+    # After settling, update() holds: nothing more is sent.
+    assert flash.update(0.0427) is None
+    assert flash.value == 10
+
+
+def test_kick_flash_reset_returns_to_base():
+    """reset() returns the flash to the base (used after a reconnect)."""
+    flash = audio.KickFlash(base=10, peak=100)
+    flash.trigger()
+    flash.update(0.01)
+    flash.reset()
+    assert flash.value == 10
+    assert flash.update(0.0427) is None  # settled: nothing to send
+
+
+def test_kick_flash_equal_ends_do_nothing():
+    """peak == base: there is nothing to flash, so trigger() returns None
+    and update() never sends (the static case for the flash)."""
+    flash = audio.KickFlash(base=50, peak=50)
+    assert flash.trigger() is None
+    assert flash.update(0.0427) is None

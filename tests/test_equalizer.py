@@ -298,6 +298,83 @@ def test_cli_brightness_mode_flag():
     assert eq._bright.bmax == 100
 
 
+def test_cli_bass_mode_flag():
+    """--brightness-mode accepts bass (default still static) and
+    --bass-sensitivity defaults to 1.0; both are forwarded to the engine."""
+    from pypixel_eq.__main__ import build_parser
+    args = build_parser().parse_args([])
+    assert args.brightness_mode == "static"  # default unchanged
+    assert args.bass_sensitivity == 1.0
+    custom = build_parser().parse_args(
+        ["--brightness-mode", "bass", "--bass-sensitivity", "2.0"])
+    assert custom.brightness_mode == "bass"
+    assert custom.bass_sensitivity == 2.0
+    eq = Equalizer(brightness_mode="bass", bass_sensitivity=2.0)
+    assert eq.brightness_mode == "bass"
+    assert eq.bass_sensitivity == 2.0
+    # The stored sensitivity reaches the detector.
+    assert eq._kick.sensitivity == 2.0
+
+
+def test_bass_mode_builds_detector_and_flash_only_in_bass():
+    """Bass mode builds the kick detector + flash; the other modes pay
+    no detection cost (they are None)."""
+    assert Equalizer(brightness_mode="bass")._kick is not None
+    assert Equalizer(brightness_mode="bass")._flash is not None
+    for mode in ("static", "auto"):
+        eq = Equalizer(brightness_mode=mode)
+        assert eq._kick is None
+        assert eq._flash is None
+
+
+def test_bass_mode_invalid_sensitivity_rejected():
+    for bad in (0, -1.0):
+        with pytest.raises(ValueError):
+            Equalizer(brightness_mode="bass", bass_sensitivity=bad)
+
+
+def test_bass_mode_current_brightness_is_the_flash_value():
+    """current_brightness follows the flash (which decays back to the
+    base after each kick); the view dims from it."""
+    eq = Equalizer(brightness_min=10, brightness_max=100,
+                   brightness_mode="bass")
+    assert eq.current_brightness == 10  # at the base
+    eq._flash.trigger()
+    assert eq.current_brightness == 100  # at the peak
+
+
+def test_bass_mode_kick_feeds_and_pushes_the_flash():
+    """A fired kick snaps the panel to the peak (a write), and the decay
+    back to the base is driven per-frame by _send_bright - so a kick
+    produces a flash, not a ramp. Silence produces no writes."""
+    eq = Equalizer(brightness_min=10, brightness_max=100,
+                   brightness_mode="bass")
+    dev = _BrightStub()
+    sr = audio.SAMPLE_RATE
+    # Warm the detector past its warm-up with silence (no fire).
+    for i in range(0, int(3 * sr), 1024):
+        eq._kick_feed(dev, np.zeros(1024))
+    assert dev.pushed == []  # silence does not flash
+    # A kick fires: the panel is pushed to the peak instantly.
+    n = int(0.12 * sr)
+    ts = np.arange(n) / sr
+    kick = 0.8 * np.exp(-ts / 0.035) * np.sin(2 * np.pi * 60.0 * ts)
+    for i in range(0, len(kick), 1024):
+        eq._kick_feed(dev, kick[i:i + 1024])
+    assert dev.pushed and dev.pushed[0] == 100  # snap to the peak
+    # The decay is driven per-frame by _send_bright (the flash).
+    dummy = np.zeros(audio.FRAME)
+    for _ in range(200):
+        eq._send_bright(dev, dummy)
+    # The decay walked back to the base.
+    assert 10 in dev.pushed
+    # Silence frames produce no further writes once settled.
+    n_settled = len(dev.pushed)
+    for _ in range(50):
+        eq._send_bright(dev, dummy)
+    assert len(dev.pushed) == n_settled
+
+
 def test_static_mode_leaves_device_brightness_untouched():
     """In static mode the ramp is never fed and no brightness command
     rides on a frame (the fixed minimum is set once at connect)."""

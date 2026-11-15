@@ -12,6 +12,7 @@ level per band (attack/release smoothing).
 """
 from __future__ import annotations
 
+import math
 from collections import deque
 
 import numpy as np
@@ -31,6 +32,26 @@ LLOUD_CEIL  = -3.0      # loudness (dBFS) read as the maximum brightness
 BATTACK = 0.100         # seconds for the brightness to rise
 BRELEASE = 0.500        # seconds for the brightness to fall
 BSTEP = 4.0             # panel brightness must move this far (%) before a write
+# Kick detection (bass mode): a high-rate onset detector, decoupled from the
+# 2048-sample band analysis. The window is the analysis frame (so the bass
+# is resolved and a sustained drone is edge-only), but it is stepped at a
+# short hop, so an onset is seen a few ms after it happens - a steep flash
+# instead of one smeared over the 85 ms window.
+KICK_WIN = FRAME        # FFT window (23.4 Hz/bin: resolves the kick zone)
+KICK_HOP = 256          # step: 5.3 ms @ 48 kHz -> 187.5 Hz analysis rate
+KICK_Z0 = 1             # lowest kick bin (23.4 Hz, skips DC)
+KICK_Z1 = 4             # highest kick bin (up to 94 Hz)
+KICK_DELTA = 5.0        # onset threshold: flux must exceed this * EMA
+KICK_FLOOR = 2.0        # absolute flux floor (full-scale ref.), a noise gate
+KICK_REFRAC = 0.25      # minimum seconds between flashes (one per hit)
+KICK_WARMUP = 0.5       # seconds to observe before the detector may fire
+                          # (a steady level's per-hop flux is phase-noise,
+                          # not an onset; the EMA must settle above it
+                          # first, or the first bassline hit after connect
+                          # flashes once)
+KICK_EMA_TAU = 1.5      # seconds, adaptive-threshold memory
+KICK_TAU = 0.25         # seconds, flash decay time constant
+KICK_STEP = 1.0         # % brightness step before a flash/decay write
 
 
 def find_loopback_input(p):
@@ -332,3 +353,149 @@ class BrightnessRamp:
             self._value = target
             return target
         return None
+
+
+class KickFlash:
+    """A kick flash: snap the brightness to the peak, decay back to the base.
+
+    A kick is a flash, not a ramp: on trigger the value jumps to ``peak``
+    (minimal attack - no rise, so the flash is instant), then it decays
+    exponentially back to ``base`` with time constant ``KICK_TAU``. Like
+    the loudness ramp it is integer-stepped: it only *returns a brightness
+    to send* when the value has moved at least ``KICK_STEP`` (1 %) from the
+    last one sent, so the flash and the decay are written as a short
+    staircase (one 5-byte command per step) and nothing is written while
+    the value holds. If ``peak == base`` there is nothing to flash.
+    """
+
+    def __init__(self, base, peak):
+        base = int(round(float(base)))
+        peak = int(round(float(peak)))
+        if not (0 <= base <= 100 and 0 <= peak <= 100):
+            raise ValueError("brightness must be 0..100")
+        self.base = base
+        self.peak = peak
+        self._value = float(base)  # the (decaying) flash value
+        self._last = base           # the brightness last sent to the panel
+        self._active = False        # a flash is in progress
+
+    def trigger(self):
+        """Snap to the peak (a kick). Returns the peak to send, or None
+        when there is nothing to flash (``peak == base``). Minimal attack:
+        no ramp up - the flash is instant."""
+        if self.peak == self.base:
+            return None
+        self._value = float(self.peak)
+        self._last = self.peak
+        self._active = True
+        return self.peak
+
+    def update(self, dt):
+        """Advance the decay; return the brightness to send, or None when
+        the panel does not need an update (the value moved < ``KICK_STEP``
+        from the last one sent, or nothing has happened)."""
+        if self._active:
+            # Exponential decay toward the base: a fraction 1 - e^(-dt/tau)
+            # of the way each hop. The flash already jumped to the peak on
+            # trigger, so this only ever falls.
+            self._value += (self.base - self._value) * (
+                1.0 - math.exp(-dt / KICK_TAU))
+            target = int(round(self._value))
+            if abs(target - self._last) >= KICK_STEP:
+                self._last = target
+                if target <= self.base:
+                    self._active = False
+                return target
+        return None
+
+    def reset(self):
+        """Return to the base (used after a reconnect)."""
+        self._value = float(self.base)
+        self._last = self.base
+        self._active = False
+
+    @property
+    def value(self):
+        """The brightness currently at the panel (0..100)."""
+        return self._last
+
+
+class KickDetector:
+    """Detect a kick: a bass onset, not a level.
+
+    Runs its own short-hop FFT on the mono stream, decoupled from the
+    2048-sample band analysis, so an onset is seen a few ms after it
+    happens (a steep flash) instead of being smeared over the 85 ms
+    window. Each hop it sums the positive spectral differences (flux) of
+    the lowest bins - only what has *grown* since the last hop. A kick is
+    that growth, a kick-on-top of a steady bass line is the burst above
+    the line, and a sustained line (a drone) grows nothing, so it is
+    edge-only and never fires. The threshold is adaptive: it must exceed
+    ``KICK_DELTA * sensitivity`` times a slow EMA of the flux (the recent
+    bass level) *and* an absolute ``KICK_FLOOR`` (a noise gate, so silence
+    with hiss doesn't flash). ``KICK_REFRAC`` keeps one flash per hit (a
+    kick spans several hops, so without it one kick would flash three
+    times). ``sensitivity`` scales the threshold: higher = only strong
+    hits, fewer flashes; lower = more flashes.
+    """
+
+    def __init__(self, sensitivity=1.0):
+        if sensitivity <= 0:
+            raise ValueError("bass sensitivity must be > 0")
+        self.sensitivity = float(sensitivity)
+        self._win = _hann(KICK_WIN)
+        self._prev = None            # the last hop's low-bin magnitudes
+        self._ema = 0.0              # the adaptive (slow) flux level
+        self._last = -1e9            # when the last flash fired (s)
+        self._t = 0.0                # elapsed time (s), for the refractory
+        self._buf = np.zeros(0)      # samples waiting for the next hop
+        self._hop_dt = KICK_HOP / SAMPLE_RATE
+        self._alpha = self._hop_dt / KICK_EMA_TAU
+
+    def feed(self, chunk):
+        """Consume mono samples (int16-scaled to [-1,1]); return True if a
+        kick fired in this chunk (the caller triggers the flash)."""
+        self._buf = np.concatenate(
+            [self._buf, np.asarray(chunk, dtype=np.float64)])
+        fired = False
+        while len(self._buf) >= KICK_WIN:
+            hop, self._buf = self._buf[:KICK_WIN], self._buf[KICK_HOP:]
+            if self._hop(hop):
+                fired = True
+        return fired
+
+    def _hop(self, hop):
+        self._t += self._hop_dt
+        mag = np.abs(np.fft.rfft(hop * self._win))
+        zone = mag[KICK_Z0:KICK_Z1]
+        if self._prev is None:
+            # The first hop is the baseline: it establishes the current
+            # level instead of reading it as an onset, so a steady level
+            # at connect (or right after a reset) does not flash.
+            flux = 0.0
+        else:
+            flux = float(np.sum(np.maximum(0.0, zone - self._prev)))
+        self._prev = zone
+        self._ema = (1.0 - self._alpha) * self._ema + self._alpha * flux
+        threshold = KICK_DELTA * self.sensitivity * self._ema + KICK_FLOOR
+        # A change needs a baseline: within KICK_WARMUP the EMA is still
+        # climbing from zero, so the threshold is near the floor and a
+        # steady level's phase-noise flux (up to ~2.3 at 0.8 full scale)
+        # could exceed it. Observe first, so the first hit after a
+        # connect/reset is measured against a settled threshold.
+        fired = (
+            self._t >= KICK_WARMUP
+            and flux > threshold
+            and (self._t - self._last) >= KICK_REFRAC
+        )
+        if fired:
+            self._last = self._t
+        return fired
+
+    def reset(self):
+        """Clear the state (used after a reconnect)."""
+        self._prev = None
+        self._ema = 0.0
+        self._last = -1e9
+        self._t = 0.0
+        self._buf = np.zeros(0)

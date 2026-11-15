@@ -180,11 +180,14 @@ behaviour.
 |---|---|
 | `static` (default) | the panel holds `--brightness-min`. |
 | `auto` | the brightness follows the overall loudness: quiet passages fall to `--brightness-min` (-50 dBFS), loud ones rise to `--brightness-max` (-3 dBFS), in between they are linear. The panel only receives a write when the level has moved a full step, so quiet passages hold their value and loud ones step up. |
+| `bass` | the panel sits at `--brightness-min` (dark) and flashes to `--brightness-max` on each kick, decaying back over ~0.25 s. A kick detector runs its own short-hop FFT on the mono stream: only the lowest frequency bins count, a sustained bass line (no onset) never fires, and the adaptive threshold means `--bass-sensitivity` only changes which hits register over an active bassline (higher = fewer flashes). |
 
 ```bash
 uv run python -m pypixel_eq -a <MAC> --brightness-min 30
 uv run python -m pypixel_eq -a <MAC> --brightness-mode auto \
      --brightness-min 20 --brightness-max 100
+uv run python -m pypixel_eq -a <MAC> --brightness-mode bass \
+     --brightness-min 10 --bass-sensitivity 1.0
 ```
 
 ### Panel update rate (`--overlap` 0-2, default 0)
@@ -272,9 +275,10 @@ uv run python -m pypixel_eq --no-auto-gain --gain-window 10
 | `--gain-percentile P` | Which value of the gain window maps to level 15 (default 100 = max; 95 ignores the loudest 5 % of frames). |
 | `--band-stat peak\|rms` | Per-band value: `peak` (default, loudest bin) or `rms` (total band power: steadier, lifts broadband highs). |
 | `--tilt N` | Fixed spectral tilt in dB/octave around 1 kHz (default 0; positive = brighter, negative = warmer). |
-| `--brightness-min PCT` | Panel brightness 0..100 (default 100). Static: the fixed value, set at connect and after every reconnect (the panel keeps its last display across links). Auto: the brightness at a quiet level (-50 dBFS). |
-| `--brightness-max PCT` | Panel brightness 0..100 (default 100), the ceiling in auto mode: the brightness at a loud level (-3 dBFS). Ignored in static mode. |
-| `--brightness-mode MODE` | `static` (default, holds the minimum) or `auto` (the brightness follows the overall loudness between the two). |
+| `--brightness-min PCT` | Panel brightness 0..100 (default 100). Static: the fixed value, set at connect and after every reconnect (the panel keeps its last display across links). Auto: the brightness at a quiet level (-50 dBFS). Bass: the dark base the flash decays back to. |
+| `--brightness-max PCT` | Panel brightness 0..100 (default 100). Auto: the ceiling at a loud level (-3 dBFS). Bass: the peak the flash snaps to. Ignored in static mode. |
+| `--brightness-mode MODE` | `static` (default, holds the minimum), `auto` (the brightness follows the overall loudness between the two) or `bass` (kick flashes: dark base, flash to the maximum on each hit, decay back). |
+| `--bass-sensitivity F` | Kick-detection threshold scale (default 1.0, bass mode only): higher = only strong kicks flash (fewer flashes), lower = softer kicks flash too. |
 | `--test` | Synthetic 11-band stimulus (no audio device needed). |
 | `--verbose` | DEBUG logging (BLE traffic, sends, notifies). |
 
@@ -290,8 +294,10 @@ uv run pytest pypixelcolor/tests -q   # the pinned library fork
 
 Coverage: band masks partition the FFT bins, a single tone peaks in its own
 band, quiet → level 0, attack/release timing, stereo downmix, `dt` at 44.1 kHz,
-reconnect behaviour, GUI error rescheduling, and byte-identical `rhythm` /
-`png` payloads against the fork's command builders.
+reconnect behaviour, GUI error rescheduling, kick detection (a steady bass
+line never fires, a hit does, one fire per beat, high-frequency onsets and
+noise rejected), and byte-identical `rhythm` / `png` payloads against the
+fork's command builders.
 
 ## Troubleshooting
 

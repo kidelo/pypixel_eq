@@ -3,13 +3,14 @@
 
 Run:
     python -m pypixel_eq [-a <MAC>] [--gui]
-                         [--transport png|rhythm] [--rhythm-style 0]
-                         [--fps F] [--overlap N] [--queue N]
-                         [--attack S] [--release S] [--gain-percentile P]
-                         [--band-stat peak|rms] [--tilt DB_PER_OCT]
-                         [--brightness-min PCT] [--brightness-max PCT]
-                         [--brightness-mode static|auto]
-                         [--no-response] [--test] [--verbose]
+                          [--transport png|rhythm] [--rhythm-style 0]
+                          [--fps F] [--overlap N] [--queue N]
+                          [--attack S] [--release S] [--gain-percentile P]
+                          [--band-stat peak|rms] [--tilt DB_PER_OCT]
+                          [--brightness-min PCT] [--brightness-max PCT]
+                          [--brightness-mode static|auto|bass]
+                          [--bass-sensitivity F]
+                          [--no-response] [--test] [--verbose]
 
   -a <MAC>            send to the panel
   --gui               live view (bands + panel emulation)
@@ -42,14 +43,22 @@ Run:
   --brightness-min PCT  panel brightness in % (default 100). In static
                       mode this is the fixed brightness (set at connect
                       and after every reconnect); in auto mode it is the
-                      brightness at a quiet level (-50 dBFS)
+                      brightness at a quiet level (-50 dBFS); in bass
+                      mode it is the dark base the flash decays back to
   --brightness-max PCT  panel brightness in % (default 100), the ceiling
                       in auto mode: the brightness at a loud level
-                      (-3 dBFS). Ignored in static mode
-  --brightness-mode MODE  static (default, holds --brightness-min) or
+                      (-3 dBFS); in bass mode it is the peak the flash
+                      snaps to. Ignored in static mode
+  --brightness-mode MODE  static (default, holds --brightness-min),
                       auto (the brightness follows the overall loudness:
-                      quiet = dim, loud = bright, between --brightness-min
-                      and --brightness-max)
+                      quiet = dim, loud = bright, between
+                      --brightness-min and --brightness-max) or bass
+                      (the panel sits at --brightness-min and flashes to
+                      --brightness-max on each kick, decaying back)
+  --bass-sensitivity F  kick-detection threshold scale (default 1.0, bass
+                      mode only): higher = only strong kicks flash (fewer
+                      flashes), lower = softer kicks flash too (more
+                      flashes)
   --no-response       write BLE chunks without a link-layer response
                       (experiment: lower latency, less reliable)
   --test              feed a synthetic 11-band stimulus instead of
@@ -150,17 +159,28 @@ def build_parser():
                         help="panel brightness in %% (default 100). Static "
                              "mode: the fixed brightness, set at connect "
                              "and after every reconnect. Auto mode: the "
-                             "brightness at a quiet level (-50 dBFS)")
+                             "brightness at a quiet level (-50 dBFS). "
+                             "Bass mode: the dark base the flash decays "
+                             "back to")
     parser.add_argument("--brightness-max", type=int, default=100,
                         help="panel brightness in %% (default 100), the "
                              "ceiling in auto mode: the brightness at a "
-                             "loud level (-3 dBFS); ignored in static mode")
+                             "loud level (-3 dBFS); in bass mode the "
+                             "peak the flash snaps to; ignored in static "
+                             "mode")
     parser.add_argument("--brightness-mode",
-                        choices=("static", "auto"), default="static",
+                        choices=("static", "auto", "bass"), default="static",
                         help="brightness control: static (default, holds "
-                             "--brightness-min) or auto (the brightness "
+                             "--brightness-min), auto (the brightness "
                              "follows the overall loudness, between the "
-                             "minimum and the maximum)")
+                             "minimum and the maximum) or bass (the panel "
+                             "sits at the minimum and flashes to the "
+                             "maximum on each kick, decaying back)")
+    parser.add_argument("--bass-sensitivity", type=float, default=1.0,
+                        help="kick-detection threshold scale (default 1.0, "
+                             "bass mode only): higher = only strong kicks "
+                             "flash (fewer flashes), lower = softer kicks "
+                             "flash too (more flashes)")
     parser.add_argument("--test", action="store_true",
                         help="feed a synthetic 11-band stimulus instead of "
                              "capturing system audio (no audio device needed)")
@@ -198,6 +218,8 @@ def main():
         sys.exit("--brightness-min must be 0..100")
     if not 0 <= args.brightness_max <= 100:
         sys.exit("--brightness-max must be 0..100")
+    if args.bass_sensitivity <= 0:
+        sys.exit("--bass-sensitivity must be > 0")
     # Always log at INFO so a "BLE device disconnected" event is visible
     # without any flag; --verbose adds DEBUG (wire traffic, notifies).
     setup_logging("DEBUG" if args.verbose else "INFO")
@@ -215,6 +237,7 @@ def main():
                    brightness_min=args.brightness_min,
                    brightness_max=args.brightness_max,
                    brightness_mode=args.brightness_mode,
+                   bass_sensitivity=args.bass_sensitivity,
                    overlap=args.overlap, queue_size=args.queue,
                    write_with_response=args.write_with_response,
                    attack=args.attack, release=args.release)
