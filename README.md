@@ -8,34 +8,25 @@ Audio-reactive equalizer for an [iPixel Color](https://ipixel.com.tw/) LED
 panel. It captures the system audio output, analyzes it into **11 log-spaced
 frequency bands** (20 Hz – 12 kHz) and streams the result to the panel over
 BLE — either as band levels for the panel's own visualizer, or as rendered
-64×16 frames.
+64×16 frames. The panel's own brightness can follow the music too (a dim
+loudness ramp, or a kick flash on the bass).
 
 ![Equalizer bars rendered for a 64×16 panel](docs/banner.png)
 
-## Features
+## What you get
 
 - 11 log-spaced bands with attack/release smoothing, levels 0..15.
 - **Adaptive max** (auto-gain): the recent peak normalizes all bars together,
   so quiet passages stay visible and loud ones do not pin at the top.
 - Two transports: `rhythm` (16 bytes/frame, panel draws the bars) and `png`
   (rendered frame, true full replace, stable 10 fps).
-- **Non-blocking writer**: `update()` hands the frame to a background thread
-  (newest wins), so BLE latency never stalls the audio analysis.
+- **Panel brightness control** over the panel's own hardware brightness:
+  `static` (fixed), `auto` (follows the loudness), or `bass` (kick flashes).
+- **Non-blocking writer**: frames are handed to a background thread (newest
+  wins), so BLE latency never stalls the audio analysis.
 - Reconnects automatically with backoff; the GUI and analysis keep running.
 - Live tkinter view with a 64×16 panel emulation, and a `--test` mode that
   needs no audio device and no hardware.
-
-## Transports
-
-| Transport | What is sent | Notes |
-|---|---|---|
-| `rhythm` (default) | Only the 11 band levels (0..15) | The panel's **native** music visualizer draws the bars itself. ~16 bytes/update, ~110-byte wire frame. |
-| `png` | A rendered 64×16 static-image frame | A TRUE full replace of the panel each update; stable up to 10 fps. |
-
-Both transports are **fire-and-forget** (no panel protocol ACK is awaited):
-the panel does not reliably ACK these writes, and waiting for one stalls the
-frame loop. `--queue N` sets how many frames may wait for the radio
-(default 1; the oldest unsent frame is dropped).
 
 ## Install
 
@@ -72,96 +63,57 @@ uv sync --extra dev --extra audio
 
 ## Quick start
 
+Find your panel's MAC (a BLE scanner works), then:
+
 ```bash
-# Live view only: bands + panel emulation, system audio, no hardware.
+# See it without hardware: bands + panel emulation, live system audio.
 uv run python -m pypixel_eq --gui
 
-# Stream to a panel (rhythm transport, the default).
+# Drive a panel (rhythm transport, the default).
 uv run python -m pypixel_eq -a <MAC>
 
-# Rendered frames instead (true full replace, held at 10 fps).
-uv run python -m pypixel_eq -a <MAC> --transport png
-
-# Higher refresh rate of the native visualizer.
-uv run python -m pypixel_eq -a <MAC> --overlap 1
-
-# No audio device: synthetic 11-band stimulus.
+# No audio device? Synthetic 11-band stimulus through the same pipeline.
 uv run python -m pypixel_eq --test --gui
 ```
 
-`--test` is the fastest way to check the BLE path without playing audio; it
-feeds a synthetic sweep through the same render/send pipeline.
+`--gui` works with or without a panel: with `-a <MAC>` it also drives the
+panel while showing the emulation; without it, it shows the view only.
+`--test` is the fastest way to check the render/send path with no hardware.
+
+## Tune by goal
+
+| I want to… | Use |
+|---|---|
+| Just a clean visualizer | `uv run python -m pypixel_eq -a <MAC>` (defaults) |
+| A rendered image instead of the panel's bars | add `--transport png` |
+| Dim the panel when it's quiet, bright when loud | add `--brightness-mode auto --brightness-min 20 --brightness-max 100` |
+| A dark panel that flashes on the kick | add `--brightness-mode bass --brightness-min 10` |
+| Only the hardest kicks flash (calmer) | `--bass-sensitivity 3.0` (higher = fewer flashes) |
+| Slower, smoother bars | `--release 0.2` |
+| Punchy transients stop squashing every bar | `--gain-percentile 95` |
+| Warmer / brighter balance | `--tilt -1` / `--tilt +1` |
+| Faster panel refresh | `--overlap 1` (up to 2) |
+| Check the BLE path with no music | `--test` |
+
+## Transports
+
+| Transport | What is sent | Notes |
+|---|---|---|
+| `rhythm` (default) | Only the 11 band levels (0..15) | The panel's **native** music visualizer draws the bars itself. ~16 bytes/update, ~110-byte wire frame. |
+| `png` | A rendered 64×16 static-image frame | A TRUE full replace of the panel each update; stable up to 10 fps. |
+
+Both transports are **fire-and-forget** (no panel protocol ACK is awaited):
+the panel does not reliably ACK these writes, and waiting for one stalls the
+frame loop. `--queue N` sets how many frames may wait for the radio
+(default 1; the oldest unsent frame is dropped).
 
 ## How it works
 
 ```
 system audio ─► WASAPI/monitor ─► Hann-windowed FFT (2048) ─► 11 bands
-      ─► dB ─► levels 0..15 (attack/release, auto-gain)
-      ─► render (png only) ─► payload ─► background writer ─► BLE
+       ─► dB ─► levels 0..15 (attack/release, auto-gain)
+       ─► render (png only) ─► payload ─► background writer ─► BLE
 ```
-
-### Band value (`--band-stat peak|rms`, default `peak`)
-
-Each band is reduced to one dB value. `peak` (the default) takes the loudest
-bin: it tracks the strongest single component and is what a tone calibrates
-to, but it jumps between bins from frame to frame. `rms` takes the band's
-root-sum-square of power, `sqrt(sum(|X|²))`, which is the RMS per bin times
-the band's width (`sqrt(n_bins) * sqrt(mean(|X|²))`).
-
-The width factor is the part that is easy to get wrong. A plain mean over
-the bins would make the wide upper bands read up to 23 dB lower than a
-two-bin band, so the same tone would shrink just by moving up in frequency;
-filterbanks call the correction area normalization and it keeps a tone
-calibrated everywhere (within 3 dB of the peak). It is also the physically
-correct band level: a flat-in-Hz spectrum (white noise) has more power in a
-wide band, so it rises 3 dB per octave, and pink noise - equal energy per
-octave, which is what music approximates - comes out flat.
-
-Measured on a 2048 window (bins per band 1,1,2,4,7,12,23,39,71,126,225):
-
-| signal | `peak` | `rms` |
-|---|---|---|
-| tone, own band | reference | +1.8…3.0 dB |
-| white noise (should rise 3 dB/oct) | flat (+7 dB over the range) | rise, +16 dB at the top |
-| pink noise (should be flat) | falls 16 dB | flat (0.8 dB spread) |
-| tone drifting between bins | 0.4 dB jitter | 0.0 dB jitter |
-| pink noise, top band | 1.4 dB jitter | 1.0 dB jitter |
-
-So `rms` fixes the shape that `peak` gets wrong on music: with `peak`, pink
-noise - i.e. most music - falls ~16 dB from the low to the high bands, which
-is exactly the "the highs are always dead" complaint. Projects that take the
-plain bin mean instead of the band power compensate with a fixed per-band
-gain table tuned on pink noise (a "pink" table); `rms` is that correction,
-computed from the band width rather than hand-tuned, so applying such a table
-on top would double-count it. A taste curve (lift 60 Hz, tame 3 kHz) is a
-different feature.
-
-With `--no-auto-gain` the rhythm transport's energy fold also reads a few dB
-louder under `rms` (it uses the fixed span).
-
-### Spectral tilt (`--tilt`, default 0)
-
-A fixed gain per band around a 1 kHz pivot: `gain = tilt * log2(f / 1000)`,
-clamped to ±12 dB per band. Positive is brighter (highs up, bass down),
-negative warmer. It is a taste curve on top of the band statistic, not a
-measurement correction — `--band-stat rms` already produces the correct band
-level, so a tilt here only sets the balance.
-
-Music is not flat: a balanced mix falls ~5 dB/octave from 100 Hz to 4 kHz.
-With `--band-stat rms` a music-like spectrum reads roughly level 14 in the
-bass and 10 in the highs, so ±1 dB/octave moves that balance by 2–3 level
-steps:
-
-| `--tilt` | effect |
-|---|---|
-| `0` | unchanged (default) |
-| `-1` | warmer: +5 dB at 30 Hz, −3 dB at 9 kHz |
-| `+1` | brighter: −5 dB at 30 Hz, +3 dB at 9 kHz |
-| `±6` | maximum slope, clamped at ±12 dB per band |
-
-The tilt is applied before the auto-gain ceiling, so the ceiling follows the
-shaped spectrum. With `--no-auto-gain` the rhythm transport's energy fold
-(the fixed -70/-20 dB span) also shifts with it.
 
 ### Panel brightness (`--brightness-min PCT`, `--brightness-max PCT`, default 100)
 
@@ -228,6 +180,69 @@ The image path has a different limit: above ~10 fps the panel drops or
 redraws frames (visible flicker) no matter how fast the writes are, so the
 `png` transport holds 10 fps unless `--fps` says otherwise.
 
+### Bar shape (`--band-stat`, `--tilt`, `--attack`, `--release`)
+
+**`--band-stat peak|rms` (default `peak`)** — each band is reduced to one dB
+value. `peak` takes the loudest bin: it tracks the strongest single component
+and is what a tone calibrates to, but it jumps between bins from frame to
+frame. `rms` takes the band's root-sum-square of power, `sqrt(sum(|X|²))`,
+which is the RMS per bin times the band's width (`sqrt(n_bins) *
+sqrt(mean(|X|²))`).
+
+The width factor is the part that is easy to get wrong. A plain mean over the
+bins would make the wide upper bands read up to 23 dB lower than a two-bin
+band, so the same tone would shrink just by moving up in frequency;
+filterbanks call the correction area normalization and it keeps a tone
+calibrated everywhere (within 3 dB of the peak). It is also the physically
+correct band level: a flat-in-Hz spectrum (white noise) has more power in a
+wide band, so it rises 3 dB per octave, and pink noise - equal energy per
+octave, which is what music approximates - comes out flat.
+
+Measured on a 2048 window (bins per band 1,1,2,4,7,12,23,39,71,126,225):
+
+| signal | `peak` | `rms` |
+|---|---|---|
+| tone, own band | reference | +1.8…3.0 dB |
+| white noise (should rise 3 dB/oct) | flat (+7 dB over the range) | rise, +16 dB at the top |
+| pink noise (should be flat) | falls 16 dB | flat (0.8 dB spread) |
+| tone drifting between bins | 0.4 dB jitter | 0.0 dB jitter |
+| pink noise, top band | 1.4 dB jitter | 1.0 dB jitter |
+
+So `rms` fixes the shape that `peak` gets wrong on music: with `peak`, pink
+noise - i.e. most music - falls ~16 dB from the low to the high bands, which
+is exactly the "the highs are always dead" complaint. Projects that take the
+plain bin mean instead of the band power compensate with a fixed per-band
+gain table tuned on pink noise (a "pink" table); `rms` is that correction,
+computed from the band width rather than hand-tuned, so applying such a table
+on top would double-count it. A taste curve (lift 60 Hz, tame 3 kHz) is a
+different feature.
+
+**`--tilt N` (default 0, ±6)** — a fixed gain per band around a 1 kHz pivot:
+`gain = tilt * log2(f / 1000)`, clamped to ±12 dB per band. Positive is
+brighter (highs up, bass down), negative warmer. It is a taste curve on top
+of the band statistic, not a measurement correction — `--band-stat rms`
+already produces the correct band level, so a tilt here only sets the balance.
+
+Music is not flat: a balanced mix falls ~5 dB/octave from 100 Hz to 4 kHz.
+With `--band-stat rms` a music-like spectrum reads roughly level 14 in the
+bass and 10 in the highs, so ±1 dB/octave moves that balance by 2–3 level
+steps:
+
+| `--tilt` | effect |
+|---|---|
+| `0` | unchanged (default) |
+| `-1` | warmer: +5 dB at 30 Hz, −3 dB at 9 kHz |
+| `+1` | brighter: −5 dB at 30 Hz, +3 dB at 9 kHz |
+| `±6` | maximum slope, clamped at ±12 dB per band |
+
+The tilt is applied before the auto-gain ceiling, so the ceiling follows the
+shaped spectrum. With `--no-auto-gain` the rhythm transport's energy fold
+(the fixed -70/-20 dB span) also shifts with it.
+
+**`--attack S` / `--release S` (defaults 0.001 / 0.05)** — seconds for a bar
+to rise to a louder level / fall back. Attack is instant by default (the bar
+jumps on the hit); raise release for a slower, smoother decay.
+
 ### Adaptive max (auto-gain, on by default)
 
 The bars are normalized to the **recent maximum over all bands**: the max of
@@ -262,24 +277,28 @@ uv run python -m pypixel_eq --no-auto-gain --gain-window 10
 |---|---|
 | `-a, --address <MAC>` | BLE address; without it nothing is sent to the panel. |
 | `--gui` | Live tkinter view (bands + panel emulation). |
+| `--test` | Synthetic 11-band stimulus (no audio device needed). |
+| **Transport** | |
 | `--transport png\|rhythm` | Device transport (default `rhythm`). |
 | `--rhythm-style N` | Rhythm-transport panel preset 0..4 (default 0). |
 | `--fps F` | Throttle device writes to F/s (0 = every frame for `rhythm`, the stable 10 fps for `png`; analysis rate unchanged). |
 | `--overlap N` | Panel update rate: 23.4 Hz x (1+N), N = 0..2 (default 0 = 23.4 Hz). |
 | `--queue N` | Frames that may wait for the BLE write (default 1; oldest unsent frame is dropped). |
+| `--no-response` | Write BLE chunks without a link-layer response (experiment: lower latency). |
+| **Bars** | |
+| `--band-stat peak\|rms` | Per-band value: `peak` (default, loudest bin) or `rms` (total band power: steadier, lifts broadband highs). |
+| `--tilt N` | Fixed spectral tilt in dB/octave around 1 kHz (default 0; positive = brighter, negative = warmer). |
 | `--attack S` | Seconds for a band to rise to a louder level (default 0.001 = instant). |
 | `--release S` | Seconds for a band to fall back (default 0.05; raise it for a slower decay). |
-| `--no-response` | Write BLE chunks without a link-layer response (experiment: lower latency). |
 | `--auto-gain` / `--no-auto-gain` | Bars scale to the recent max over all bands (on by default). |
 | `--gain-window S` | Auto-gain history: seconds of "recent max" (default 2). |
 | `--gain-percentile P` | Which value of the gain window maps to level 15 (default 100 = max; 95 ignores the loudest 5 % of frames). |
-| `--band-stat peak\|rms` | Per-band value: `peak` (default, loudest bin) or `rms` (total band power: steadier, lifts broadband highs). |
-| `--tilt N` | Fixed spectral tilt in dB/octave around 1 kHz (default 0; positive = brighter, negative = warmer). |
-| `--brightness-min PCT` | Panel brightness 0..100 (default 100). Static: the fixed value, set at connect and after every reconnect (the panel keeps its last display across links). Auto: the brightness at a quiet level (-50 dBFS). Bass: the dark base the flash decays back to. |
+| **Brightness** | |
+| `--brightness-min PCT` | Panel brightness 0..100 (default 100). Static: the fixed value, set at connect and after every reconnect. Auto: the brightness at a quiet level (-50 dBFS). Bass: the dark base the flash decays back to. |
 | `--brightness-max PCT` | Panel brightness 0..100 (default 100). Auto: the ceiling at a loud level (-3 dBFS). Bass: the peak the flash snaps to. Ignored in static mode. |
-| `--brightness-mode MODE` | `static` (default, holds the minimum), `auto` (the brightness follows the overall loudness between the two) or `bass` (kick flashes: dark base, flash to the maximum on each hit, decay back). |
+| `--brightness-mode MODE` | `static` (default, holds the minimum), `auto` (follows the loudness) or `bass` (kick flashes: dark base, flash to the maximum on each hit, decay back). |
 | `--bass-sensitivity F` | Kick-detection threshold scale (default 1.0, bass mode only): higher = only strong kicks flash (fewer flashes), lower = softer kicks flash too. |
-| `--test` | Synthetic 11-band stimulus (no audio device needed). |
+| **Debug** | |
 | `--verbose` | DEBUG logging (BLE traffic, sends, notifies). |
 
 ## Tests
@@ -307,6 +326,7 @@ fork's command builders.
 | Connects but nothing changes on the panel | Try `--transport png` once. If that works, the rhythm preset is hiding the effect (`--rhythm-style 0..4`). |
 | Panel flickers | Stay at the default `rhythm` transport, or lower `--fps`; the image path is only stable up to 10 fps. |
 | Levels barely move | Check the Windows output device (loopback follows the **default** output), disable `--no-auto-gain`, or raise `--overlap`. |
+| No kick flashes in `bass` mode | The kick needs a *hit*, not a level: a steady bass line never fires. Try a track with a clear kick, or lower `--bass-sensitivity`. The panel also sits dark for the first ~0.5 s after connect before the detector may fire. |
 | No audio device | Use `--test` to verify the rest of the pipeline. |
 | Installed code lacks a command | `uv sync` — the venv may still hold an older build of the submodule. |
 
@@ -326,7 +346,7 @@ fork's command builders.
 pypixel_eq/
 ├── pypixelcolor/          # submodule -> kidelo/pypixelcolor-ext @ pinned commit
 ├── src/pypixel_eq/
-│   ├── audio.py           # WASAPI/monitor capture + FFT -> 11 band levels
+│   ├── audio.py           # capture + FFT -> 11 band levels, brightness/kick
 │   ├── transport.py       # payload builders + non-blocking Device writer
 │   ├── equalizer.py       # worker-thread engine (capture -> render -> send)
 │   ├── gui.py             # live tkinter view (bands + panel emulation)
