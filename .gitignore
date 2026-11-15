@@ -17,6 +17,7 @@ build/
 .idea/
 
 # Local scratch (never published)
+opencode.json
 tmp/
 *.log
 .coverage
