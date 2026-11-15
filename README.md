@@ -163,6 +163,23 @@ The tilt is applied before the auto-gain ceiling, so the ceiling follows the
 shaped spectrum. With `--no-auto-gain` the rhythm transport's energy fold
 (the fixed -70/-20 dB span) also shifts with it.
 
+### Panel brightness (`--brightness PCT`, default 100)
+
+Sets the panel's own brightness to a fixed percentage. Unlike image
+dimming, the command also works for the `rhythm` transport (the panel
+draws its own bars and there is no colour to scale), so it is the only
+brightness control that covers both transports.
+
+The panel keeps its last display across BLE links, so the value is sent
+at connect and after every reconnect: run `--brightness 30` once and it
+stays 30 on the next run too (connect blanks the display, then the
+brightness is raised). 100 is the panel's own default and the unchanged
+behaviour.
+
+```bash
+uv run python -m pypixel_eq -a <MAC> --brightness 30   # dim, both transports
+```
+
 ### Panel update rate (`--overlap` 0-2, default 0)
 
 The analysis loop re-analyzes a rolling 2048-sample window every
@@ -248,6 +265,7 @@ uv run python -m pypixel_eq --no-auto-gain --gain-window 10
 | `--gain-percentile P` | Which value of the gain window maps to level 15 (default 100 = max; 95 ignores the loudest 5 % of frames). |
 | `--band-stat peak\|rms` | Per-band value: `peak` (default, loudest bin) or `rms` (total band power: steadier, lifts broadband highs). |
 | `--tilt N` | Fixed spectral tilt in dB/octave around 1 kHz (default 0; positive = brighter, negative = warmer). |
+| `--brightness PCT` | Panel brightness 0..100 (default 100). Set at connect and after every reconnect — the panel keeps its last display across links, so this is also how a re-run restores the brightness. |
 | `--test` | Synthetic 11-band stimulus (no audio device needed). |
 | `--verbose` | DEBUG logging (BLE traffic, sends, notifies). |
 

@@ -19,8 +19,8 @@ from pypixelcolor.commands.set_rhythm_mode import set_rhythm_mode
 
 from pypixel_eq.audio import N_BANDS
 from pypixel_eq.transport import (
-    bar_color, render_image, png_payload, rhythm_payload, _close_client,
-    _PayloadSender,
+    bar_color, brightness_payload, dim_image, render_image, png_payload,
+    rhythm_payload, _close_client, _PayloadSender,
 )
 
 
@@ -260,6 +260,8 @@ class _FakeClient:
         return types.SimpleNamespace(width=64, height=16)
 
     def set_brightness(self, value):
+        if not 0 <= int(value) <= 100:
+            raise ValueError("Brightness level must be between 0 and 100")
         self.events.append("brightness")
 
     def _run_async(self, coro):
@@ -272,7 +274,51 @@ class _FakeClient:
         self.events.append("cleanup")
 
 
-def test_device_close_stops_sender_before_disconnect(monkeypatch):
+def test_brightness_payload_matches_fork_bytes():
+    """The brightness command is the fork's set_brightness, fire-and-forget."""
+    from pypixelcolor.commands.set_brightness import set_brightness
+    payload = brightness_payload(30)
+    plan = set_brightness(30)
+    assert payload == b"".join(w.data for w in plan.windows)
+    # Layout: [len=5, 0, cid=4, 0x80, level].
+    assert payload == bytes([5, 0, 4, 0x80, 30])
+    with pytest.raises(ValueError):
+        brightness_payload(101)
+
+
+def test_brightness_payload_rounds_the_percent():
+    assert brightness_payload(30.6) == bytes([5, 0, 4, 0x80, 31])
+    assert brightness_payload(0.4) == bytes([5, 0, 4, 0x80, 0])
+
+
+def test_dim_image_scales_pixels():
+    img = Image.new("RGB", (2, 1), (200, 100, 50))
+    dimmed = dim_image(img, 50)
+    assert dimmed.getpixel((0, 0)) == (100, 50, 25)
+    # 100 and None are pass-throughs (no copy).
+    assert dim_image(img, 100) is img
+    assert dim_image(img, None) is img
+    assert dim_image(img, 0).getpixel((0, 0)) == (0, 0, 0)
+
+
+def test_device_sets_brightness_at_connect(monkeypatch):
+    """A configured brightness is sent right after the connect blank, so
+    a reconnect restores the configured level, not the last run's."""
+    monkeypatch.setattr(transport, "Client", _FakeClient)
+    dev = transport.Device("AA:BB:CC:DD:EE:FF", brightness=30)
+    events = dev.client.events
+    assert events.index("connect") < events.index("brightness")
+    # The blank stays at 0; only the configured value follows.
+    dev.close()
+
+
+def test_device_brightness_default_does_not_touch_the_panel(monkeypatch):
+    """The default (100 = the panel's own value) is sent as a plain set,
+    so a reconnect restores 100 instead of a previous run's 30."""
+    monkeypatch.setattr(transport, "Client", _FakeClient)
+    dev = transport.Device("AA:BB:CC:DD:EE:FF")
+    assert "brightness" in dev.client.events
+    dev.close()
     """The writer must be joined before the link closes, otherwise a frame
     could be written to a dead session."""
     monkeypatch.setattr(transport, "Client", _FakeClient)

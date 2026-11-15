@@ -32,6 +32,7 @@ from PIL import Image, ImageDraw
 
 from pypixelcolor import Client
 from pypixelcolor.commands.send_image import _build_send_plan
+from pypixelcolor.commands.set_brightness import set_brightness
 from pypixelcolor.commands.set_rhythm_mode import set_rhythm_mode
 from pypixelcolor.lib.transport.send_plan import SendPlan, Window
 from pypixelcolor.lib.transport.ack_manager import AckPolicy
@@ -213,6 +214,32 @@ def png_payload(img):
     return n, payload
 
 
+def brightness_payload(percent):
+    """Build the panel brightness command for ``percent`` (0..100).
+
+    Wire format: ``[5, 0, 4, 0x80, level]`` - the fork's
+    ``commands.set_brightness``. It dims the whole panel, so unlike the
+    image path it also works for the rhythm transport (the panel draws
+    its own bars and there is no colour to scale). The command object
+    asks for an ACK; the plan is re-wrapped fire-and-forget at send time.
+    """
+    plan = set_brightness(int(round(percent)))
+    return b"".join(w.data for w in plan.windows)
+
+
+def dim_image(img, percent):
+    """Return ``img`` scaled to ``percent`` brightness (for the G-U-I only).
+
+    The panel dims itself when a brightness command is used, so the frame
+    that is sent stays untouched; the live view shows the emulated panel
+    at the brightness the real one is running at.
+    """
+    if percent is None or percent >= 100:
+        return img
+    factor = max(0.0, min(100.0, float(percent))) / 100.0
+    return Image.eval(img, lambda v: int(v * factor))
+
+
 def rhythm_payload(levels, style=0):
     """Build the native music-visualizer frame for ``levels`` (11 values,
     0..15) - protocol type 2, ``[16,0,1,2,<style>,l1..l11]``.
@@ -241,28 +268,40 @@ class Device:
     """
 
     def __init__(self, address, transport="png", rhythm_style=0,
-                 queue_size=1, write_with_response=True):
+                 queue_size=1, write_with_response=True, brightness=100):
         self.address = address
         self.transport = transport
         self.rhythm_style = rhythm_style
         self.queue_size = max(1, int(queue_size))
         self.write_with_response = bool(write_with_response)
+        # Panel brightness (0..100) to set at connect and after every
+        # reconnect. None = don't touch it (the panel keeps its last value).
+        self.brightness = brightness
         self._sender = None
         # Chunks are written with response (the package default): neither
         # transport produces a protocol ACK we wait for (rhythm never
         # does; the image plan's ACK wait is forced off below), so the
         # link-layer round trip costs little and keeps the radio healthy.
-        self.client = self._open_client()
+        self.client = self._open_client(brightness)
         self._sender = _PayloadSender(self._write_payload, self.queue_size)
 
-    def _open_client(self):
-        """Open a fresh client, read the panel size, blank the display."""
+    def _open_client(self, brightness=0):
+        """Open a fresh client, read the panel size, blank the display.
+
+        The panel keeps its last display across BLE links, so connect
+        blanks it: brightness 0, then - when a value is configured - the
+        panel's brightness set to it (100 is the panel's own default, so
+        passing it back is harmless and makes a reconnect restore the
+        configured brightness instead of whatever the last run left).
+        """
         client = Client(self.address,
                         write_with_response=self.write_with_response)
         try:
             client.connect()
             info = client.get_device_info()
             client.set_brightness(0)
+            if brightness is not None and brightness != 0:
+                client.set_brightness(int(brightness))
         except Exception:
             _close_client(client)
             raise
@@ -296,7 +335,7 @@ class Device:
         the new one is up, so no frame is ever written to a dead session.
         """
         self.close()
-        self.client = self._open_client()
+        self.client = self._open_client(self.brightness)
         self._sender = _PayloadSender(self._write_payload, self.queue_size)
 
     def update(self, payload):

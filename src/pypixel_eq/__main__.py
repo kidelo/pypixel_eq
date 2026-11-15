@@ -7,7 +7,8 @@ Run:
                          [--fps F] [--overlap N] [--queue N]
                          [--attack S] [--release S] [--gain-percentile P]
                          [--band-stat peak|rms] [--tilt DB_PER_OCT]
-                         [--no-response] [--test] [--verbose]
+                         [--brightness PCT] [--no-response] [--test]
+                         [--verbose]
 
   -a <MAC>            send to the panel
   --gui               live view (bands + panel emulation)
@@ -37,6 +38,11 @@ Run:
                       (default 0). Positive = brighter (highs up, bass
                       down), negative = warmer; clamped to +/-12 dB per
                       band
+  --brightness PCT    panel brightness in % (default 100 = the panel's
+                      own default). Set at connect and after every
+                      reconnect - the panel keeps its last display
+                      across links, so this is also how a re-run
+                      restores the brightness
   --no-response       write BLE chunks without a link-layer response
                       (experiment: lower latency, less reliable)
   --test              feed a synthetic 11-band stimulus instead of
@@ -133,6 +139,10 @@ def build_parser():
                              "1 kHz (default 0; positive = brighter, highs up "
                              "and bass down; negative = warmer; each band is "
                              "clamped to +/-12 dB)")
+    parser.add_argument("--brightness", type=int, default=100,
+                        help="panel brightness in %% (default 100 = the "
+                             "panel's own default); set at connect and "
+                             "after every reconnect")
     parser.add_argument("--test", action="store_true",
                         help="feed a synthetic 11-band stimulus instead of "
                              "capturing system audio (no audio device needed)")
@@ -166,6 +176,8 @@ def main():
         sys.exit("--release must be > 0")
     if abs(args.tilt) > 6:
         sys.exit("--tilt must be within +/-6 dB per octave")
+    if not 0 <= args.brightness <= 100:
+        sys.exit("--brightness must be 0..100")
     # Always log at INFO so a "BLE device disconnected" event is visible
     # without any flag; --verbose adds DEBUG (wire traffic, notifies).
     setup_logging("DEBUG" if args.verbose else "INFO")
@@ -180,6 +192,7 @@ def main():
                    auto_gain=args.auto_gain, gain_window=args.gain_window,
                    gain_percentile=args.gain_percentile,
                    band_stat=args.band_stat, tilt=args.tilt,
+                   brightness=args.brightness,
                    overlap=args.overlap, queue_size=args.queue,
                    write_with_response=args.write_with_response,
                    attack=args.attack, release=args.release)

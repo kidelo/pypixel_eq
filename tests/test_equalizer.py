@@ -239,6 +239,24 @@ def test_cli_tilt_flag():
     assert Equalizer(tilt=custom.tilt).tilt == -1.5
 
 
+def test_cli_brightness_flag():
+    """--brightness defaults to 100 (the panel's own value) and is
+    validated and forwarded to the engine."""
+    from pypixel_eq.__main__ import build_parser
+    args = build_parser().parse_args([])
+    assert args.brightness == 100
+    custom = build_parser().parse_args(["--brightness", "30"])
+    assert custom.brightness == 30
+    eq = Equalizer(brightness=custom.brightness)
+    assert eq.brightness == 30
+
+
+def test_invalid_brightness_rejected():
+    for bad in (-1, 101, 150):
+        with pytest.raises(ValueError):
+            Equalizer(brightness=bad)
+
+
 def test_cli_attack_and_release_flags():
     """--attack/--release default to the module tunables and are forwarded."""
     from pypixel_eq.__main__ import build_parser

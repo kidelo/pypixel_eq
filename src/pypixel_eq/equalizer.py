@@ -55,7 +55,8 @@ class Equalizer:
     def __init__(self, address=None, width=64, height=16, transport="png",
                  rhythm_style=0, send_hz=0.0, auto_gain=True,
                  gain_window=5.0, gain_percentile=100.0, band_stat="peak",
-                 tilt=0.0, overlap=0, queue_size=1, write_with_response=True,
+                 tilt=0.0, brightness=100, overlap=0, queue_size=1,
+                 write_with_response=True,
                  attack=ATTACK, release=RELEASE):
         self.address = address
         self.width = width
@@ -128,6 +129,13 @@ class Equalizer:
         self.tilt = float(tilt)
         self._tilt_db = tilt_db(band_centers(N_BANDS, BAND_LO, BAND_HI),
                                self.tilt)
+        # Panel brightness (0..100), set at connect and after every
+        # reconnect (the panel keeps its last display across links).
+        # 100 = the panel's own default, so it is the unchanged behaviour.
+        brightness = int(brightness)
+        if not 0 <= brightness <= 100:
+            raise ValueError("brightness must be 0..100")
+        self.brightness = brightness
 
     def start(self, test=False):
         self._test = test
@@ -259,7 +267,8 @@ class Equalizer:
             dev = Device(self.address, transport=self.transport,
                          rhythm_style=self.rhythm_style,
                          queue_size=self.queue_size,
-                         write_with_response=self.write_with_response)
+                         write_with_response=self.write_with_response,
+                         brightness=self.brightness)
         except Exception as e:
             self._put_note(f"connect failed ({e}) - display only")
             return None
@@ -285,7 +294,8 @@ class Equalizer:
                     new = Device(self.address, transport=self.transport,
                                  rhythm_style=self.rhythm_style,
                                  queue_size=self.queue_size,
-                                 write_with_response=self.write_with_response)
+                                 write_with_response=self.write_with_response,
+                                 brightness=self.brightness)
                 else:
                     dev.reconnect()
                     new = dev

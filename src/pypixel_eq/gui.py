@@ -9,7 +9,7 @@ import tkinter as tk
 from PIL import Image, ImageTk
 
 from .audio import N_BANDS, BAND_LO, BAND_HI
-from .transport import bar_color
+from .transport import bar_color, dim_image
 
 
 class EQGui:
@@ -84,8 +84,11 @@ class EQGui:
             self.bars.itemconfig(self.level_labels[k], text=str(levels[k]))
 
     def _render_device(self, img):
+        # Show the emulated panel at the brightness the real one runs at:
+        # the panel dims itself, so the sent frame is untouched.
         scale = max(1, min(512 // img.width, 128 // img.height))
-        scaled = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
+        scaled = dim_image(img, self.eq.brightness).resize(
+            (img.width * scale, img.height * scale), Image.NEAREST)
         self._dev_photo = ImageTk.PhotoImage(scaled, master=self.root)
         self.dev.itemconfig(self._dev_item, image=self._dev_photo)
 
