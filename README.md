@@ -168,6 +168,8 @@ uv run python -m pypixel_eq --no-auto-gain --gain-window 10
 | `--fps F` | Throttle device writes to F/s (0 = every frame for `rhythm`, the stable 10 fps for `png`; analysis rate unchanged). |
 | `--overlap N` | Panel update rate: 23.4 Hz x (1+N), N = 0..2 (default 0 = 23.4 Hz). |
 | `--queue N` | Frames that may wait for the BLE write (default 1; oldest unsent frame is dropped). |
+| `--attack S` | Seconds for a band to rise to a louder level (default 0.001 = instant). |
+| `--release S` | Seconds for a band to fall back (default 0.05; raise it for a slower decay). |
 | `--no-response` | Write BLE chunks without a link-layer response (experiment: lower latency). |
 | `--auto-gain` / `--no-auto-gain` | Bars scale to the recent max over all bands (on by default). |
 | `--gain-window S` | Auto-gain history: seconds of "recent max" (default 2). |

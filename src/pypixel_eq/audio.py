@@ -70,14 +70,16 @@ def make_band_masks(sample_rate, frame, n_bands, lo, hi):
     return edges, masks
 
 
-def levels_from_db(mag_db, state, dt, ceil=DB_CEIL):
+def levels_from_db(mag_db, state, dt, ceil=DB_CEIL, attack=ATTACK,
+                   release=RELEASE):
     """Map dB magnitudes to 0..15 levels with fast attack / slow release.
 
     ``state`` (length N_BANDS) is the previous per-band level, mutated in
     place. ``dt`` is the analysis interval in seconds. ``ceil`` is the dB
     level mapped to level 15: a single float (default DB_CEIL, e.g. the
     shared tracker's recent max) or one per band; DB_FLOOR is always
-    mapped to 0.
+    mapped to 0. ``attack``/``release`` are the time constants (seconds)
+    for a rising and a falling level.
     """
     if isinstance(ceil, (list, tuple)):
         spans = [c - DB_FLOOR for c in ceil]
@@ -85,8 +87,8 @@ def levels_from_db(mag_db, state, dt, ceil=DB_CEIL):
         spans = [ceil - DB_FLOOR] * len(mag_db)
     targets = [max(0.0, min(15.0, (db - DB_FLOOR) / span * 15.0))
                for db, span in zip(mag_db, spans)]
-    rise = min(1.0, dt / ATTACK)
-    fall = min(1.0, dt / RELEASE)
+    rise = min(1.0, dt / attack)
+    fall = min(1.0, dt / release)
     for i, tgt in enumerate(targets):
         if tgt > state[i]:
             state[i] += (tgt - state[i]) * rise

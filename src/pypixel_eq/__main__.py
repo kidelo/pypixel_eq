@@ -5,6 +5,7 @@ Run:
     python -m pypixel_eq [-a <MAC>] [--gui]
                          [--transport png|rhythm] [--rhythm-style 0]
                          [--fps F] [--overlap N] [--queue N]
+                         [--attack S] [--release S]
                          [--no-response] [--test] [--verbose]
 
   -a <MAC>            send to the panel
@@ -20,6 +21,10 @@ Run:
                       frequency resolution)
   --queue N           frames that may wait for the BLE write (default 1;
                       the oldest unsent frame is dropped when full)
+  --attack S          seconds for a band to rise to a louder level
+                      (default 0.001 = instant)
+  --release S         seconds for a band to fall back (default 0.05;
+                      raise it for a slower, smoother decay)
   --no-response       write BLE chunks without a link-layer response
                       (experiment: lower latency, less reliable)
   --test              feed a synthetic 11-band stimulus instead of
@@ -32,6 +37,7 @@ import sys
 
 from pypixelcolor.lib.logging import setup_logging
 
+from .audio import ATTACK, RELEASE
 from .equalizer import Equalizer, console_loop
 
 logger = logging.getLogger(__name__)
@@ -77,6 +83,13 @@ def build_parser():
                         help="frames that may wait for the BLE write "
                              "(default 1; the oldest unsent frame is "
                              "dropped when the queue is full)")
+    parser.add_argument("--attack", type=float, default=ATTACK,
+                        help=f"seconds for a band to rise to a louder level "
+                             f"(default {ATTACK:g} s = instant)")
+    parser.add_argument("--release", type=float, default=RELEASE,
+                        help=f"seconds for a band to fall back to a quieter "
+                             f"level (default {RELEASE:g} s; raise it for a "
+                             f"slower, smoother decay)")
     parser.add_argument("--no-response", dest="write_with_response",
                         action="store_false", default=True,
                         help="write BLE chunks without a link-layer "
@@ -117,6 +130,10 @@ def main():
         sys.exit("--overlap must be 0..2")
     if args.queue < 1:
         sys.exit("--queue must be >= 1")
+    if args.attack <= 0:
+        sys.exit("--attack must be > 0")
+    if args.release <= 0:
+        sys.exit("--release must be > 0")
     # Always log at INFO so a "BLE device disconnected" event is visible
     # without any flag; --verbose adds DEBUG (wire traffic, notifies).
     setup_logging("DEBUG" if args.verbose else "INFO")
@@ -130,7 +147,8 @@ def main():
                    rhythm_style=args.rhythm_style, send_hz=send_hz,
                    auto_gain=args.auto_gain, gain_window=args.gain_window,
                    overlap=args.overlap, queue_size=args.queue,
-                   write_with_response=args.write_with_response)
+                   write_with_response=args.write_with_response,
+                   attack=args.attack, release=args.release)
     try:
         eq.start(test=args.test)
     except Exception as e:

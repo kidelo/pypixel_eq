@@ -74,6 +74,26 @@ def test_levels_have_fast_attack_slow_release():
     assert all(lv <= 5 for lv in levels2)
 
 
+def test_levels_use_the_configured_time_constants():
+    """attack/release are parameters: a long release holds a level where the
+    default 50 ms release already dropped it, and a long attack keeps a jump
+    near the bottom."""
+    dt = 0.05
+    quiet = [DB_FLOOR] * N_BANDS
+    state = [15.0] * N_BANDS
+    # Default release: one 50 ms step falls all the way to 0.
+    assert all(lv == 0 for lv in levels_from_db(quiet, state, dt))
+    # 2 s release: the same step only drops ~2.5% -> still near the top.
+    state = [15.0] * N_BANDS
+    assert all(lv >= 14 for lv in levels_from_db(quiet, state, dt, release=2.0))
+    # Long attack: one 50 ms step toward the top stays at level 0..1.
+    loud = [DB_CEIL] * N_BANDS
+    state = [0.0] * N_BANDS
+    assert all(lv <= 1 for lv in levels_from_db(loud, state, dt, attack=1.0))
+    state = [0.0] * N_BANDS
+    assert all(lv == 15 for lv in levels_from_db(loud, state, dt, attack=0.001))
+
+
 def test_levels_are_integers_in_range():
     state = [0.0] * N_BANDS
     db = [-60.0, DB_FLOOR, -45.0, -20.0, DB_CEIL, 0.0, -80.0, -30.0, -50.0, -10.0, 5.0]

@@ -26,6 +26,7 @@ import numpy as np
 
 from .audio import (
     SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI, DB_FLOOR, DB_CEIL,
+    ATTACK, RELEASE,
     AutoCeiling, find_loopback_input, make_band_masks, levels_from_db,
     analyze_frame,
 )
@@ -54,12 +55,21 @@ class Equalizer:
     def __init__(self, address=None, width=64, height=16, transport="png",
                  rhythm_style=0, send_hz=0.0, auto_gain=True,
                  gain_window=5.0, overlap=0, queue_size=1,
-                 write_with_response=True):
+                 write_with_response=True, attack=ATTACK, release=RELEASE):
         self.address = address
         self.width = width
         self.height = height
         self.transport = transport
         self.rhythm_style = rhythm_style
+        # Level smoothing time constants (seconds): how fast a bar rises
+        # to a louder level and falls back. Time-based, so the same values
+        # behave identically at every device rate and --overlap level.
+        if attack <= 0:
+            raise ValueError("attack must be > 0")
+        if release <= 0:
+            raise ValueError("release must be > 0")
+        self.attack = attack
+        self.release = release
         # Device writes run on a background thread in transport.Device:
         # update() hands over the frame and returns, so the analysis loop
         # keeps its rate. queue_size is the number of frames that may wait
@@ -176,8 +186,11 @@ class Equalizer:
         the peak ages out and a quiet ceiling takes over.
         """
         if self.auto_gain:
-            return levels_from_db(mag_db, state, self.dt, ceil=self._auto.update(mag_db))
-        return levels_from_db(mag_db, state, self.dt)
+            return levels_from_db(mag_db, state, self.dt,
+                                  ceil=self._auto.update(mag_db),
+                                  attack=self.attack, release=self.release)
+        return levels_from_db(mag_db, state, self.dt,
+                              attack=self.attack, release=self.release)
 
     def _rhythm_levels(self, levels, mag_db):
         """Levels for the native visualizer transport.

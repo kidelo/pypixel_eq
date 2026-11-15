@@ -81,6 +81,38 @@ def test_invalid_overlap_and_gain_window_rejected():
         Equalizer(gain_window=0)
 
 
+def test_invalid_smoothing_rejected():
+    with pytest.raises(ValueError):
+        Equalizer(attack=0)
+    with pytest.raises(ValueError):
+        Equalizer(release=-0.1)
+
+
+def test_engine_uses_the_configured_smoothing():
+    """attack/release reach the level mapping (the engine's smoothing):
+    a slow release holds the bars up where a fast one has already fallen."""
+    slow = Equalizer(auto_gain=False, release=2.0)
+    fast = Equalizer(auto_gain=False, release=0.01)
+    state_slow = [15.0] * N_BANDS
+    state_fast = [15.0] * N_BANDS
+    quiet = [DB_FLOOR] * N_BANDS
+    assert all(lv >= 14 for lv in slow._levels(quiet, state_slow))
+    assert all(lv == 0 for lv in fast._levels(quiet, state_fast))
+
+
+def test_cli_attack_and_release_flags():
+    """--attack/--release default to the module tunables and are forwarded."""
+    from pypixel_eq.__main__ import build_parser
+    args = build_parser().parse_args([])
+    assert args.attack == audio.ATTACK
+    assert args.release == audio.RELEASE
+    custom = build_parser().parse_args(["--attack", "0.05", "--release", "0.4"])
+    assert custom.attack == 0.05
+    assert custom.release == 0.4
+    eq = Equalizer(attack=custom.attack, release=custom.release)
+    assert (eq.attack, eq.release) == (0.05, 0.4)
+
+
 def test_cli_default_transport_is_rhythm():
     """The CLI default must match the help text and README."""
     from pypixel_eq.__main__ import build_parser
