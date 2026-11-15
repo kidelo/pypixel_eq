@@ -174,6 +174,38 @@ def test_auto_ceiling_ages_out_after_window():
     assert ceiling2 == pytest.approx(DB_CEIL)
 
 
+def test_auto_ceiling_percentile_ignores_a_transient():
+    """A single loud frame lifts the max ceiling for the whole window
+    (every other bar drops); a percentile below 100 ignores it."""
+    loud = [DB_CEIL] * N_BANDS
+    steady = [DB_FLOOR + 20.0] * N_BANDS
+    auto = AutoCeiling(0.085)  # percentile 100 = max
+    p95 = AutoCeiling(0.085, percentile=95.0)
+    for _ in range(20):
+        steady_ceil = auto.update(steady)
+        p95_ceil = p95.update(steady)
+    assert steady_ceil == pytest.approx(DB_FLOOR + 20.0)
+    assert p95_ceil == pytest.approx(DB_FLOOR + 20.0)
+    # One transient frame is the loudest 1/21 ~= 4.8 % of the window...
+    assert auto.update(loud) == pytest.approx(DB_CEIL)
+    # ...so the 100th percentile jumps, the 95th does not.
+    assert p95.update(loud) == pytest.approx(DB_FLOOR + 20.0)
+
+
+def test_auto_ceiling_percentile_is_the_median_at_50():
+    """percentile=50 is the median of the window, not the maximum."""
+    ac = AutoCeiling(0.085, percentile=50.0)
+    for db in (-50.0, -40.0, -30.0, -20.0, -10.0):
+        ceiling = ac.update([db] * N_BANDS)
+    assert ceiling == pytest.approx(-30.0)
+
+
+def test_auto_ceiling_rejects_invalid_percentile():
+    for bad in (0, -5, 100.5):
+        with pytest.raises(ValueError):
+            AutoCeiling(0.085, percentile=bad)
+
+
 def test_auto_gain_does_not_raise_the_floor():
     """Auto-gain rescales the ceiling only: a signal BELOW its recent
     max is still mapped on the same floor, and can drop to 0 (fixed span

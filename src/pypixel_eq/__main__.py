@@ -5,7 +5,7 @@ Run:
     python -m pypixel_eq [-a <MAC>] [--gui]
                          [--transport png|rhythm] [--rhythm-style 0]
                          [--fps F] [--overlap N] [--queue N]
-                         [--attack S] [--release S]
+                         [--attack S] [--release S] [--gain-percentile P]
                          [--no-response] [--test] [--verbose]
 
   -a <MAC>            send to the panel
@@ -25,6 +25,10 @@ Run:
                       (default 0.001 = instant)
   --release S         seconds for a band to fall back (default 0.05;
                       raise it for a slower, smoother decay)
+  --gain-percentile P which value of the recent gain window maps to
+                      level 15: 100 = the maximum (default), 95 ignores
+                      the loudest 5 % of frames so a single hit no longer
+                      squashes every bar
   --no-response       write BLE chunks without a link-layer response
                       (experiment: lower latency, less reliable)
   --test              feed a synthetic 11-band stimulus instead of
@@ -105,6 +109,11 @@ def build_parser():
                         help="seconds of history for the auto-gain max "
                              "(default 2; the recent peak normalizes the "
                              "bars as a whole)")
+    parser.add_argument("--gain-percentile", type=float, default=100.0,
+                        help="which value of the gain window maps to level 15 "
+                             "(default 100 = the maximum; 95 ignores the "
+                             "loudest 5 %% of frames so a single transient "
+                             "no longer squashes every bar)")
     parser.add_argument("--test", action="store_true",
                         help="feed a synthetic 11-band stimulus instead of "
                              "capturing system audio (no audio device needed)")
@@ -126,6 +135,8 @@ def main():
         sys.exit("--fps must be >= 0")
     if args.gain_window <= 0:
         sys.exit("--gain-window must be > 0")
+    if not (0 < args.gain_percentile <= 100):
+        sys.exit("--gain-percentile must be in (0, 100]")
     if not (0 <= args.overlap <= 2):
         sys.exit("--overlap must be 0..2")
     if args.queue < 1:
@@ -146,6 +157,7 @@ def main():
     eq = Equalizer(args.address, transport=args.transport,
                    rhythm_style=args.rhythm_style, send_hz=send_hz,
                    auto_gain=args.auto_gain, gain_window=args.gain_window,
+                   gain_percentile=args.gain_percentile,
                    overlap=args.overlap, queue_size=args.queue,
                    write_with_response=args.write_with_response,
                    attack=args.attack, release=args.release)

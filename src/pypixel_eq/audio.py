@@ -100,11 +100,17 @@ def levels_from_db(mag_db, state, dt, ceil=DB_CEIL, attack=ATTACK,
 class AutoCeiling:
     """Adaptive level ceiling (auto-gain).
 
-    Tracks the MAX peak dB over a rolling window (~``window_s`` seconds)
+    Tracks the recent peak dB over a rolling window (~``window_s`` seconds)
     and returns it as the ``ceil`` argument of :func:`levels_from_db`, so
     the recent maximum maps to level 15: loud passages stop pinning at 15,
     quiet passages grow, and the loudest band of the last window is at the
     top while every other band stays proportionally scaled to it.
+
+    ``percentile`` picks WHICH value of the window becomes the ceiling:
+    100 (default) is the maximum, so a single loud transient lifts the
+    scale for the whole window. A lower value (e.g. 95) ignores the
+    loudest few percent of frames, so one hit no longer squashes every
+    bar; the frames above that ceiling simply clamp at level 15.
 
     The ceiling is GLOBAL: one rolling window over ``max(mag_db)`` per
     frame, used as the ceiling for every band. A per-band max would scale
@@ -119,9 +125,12 @@ class AutoCeiling:
     full-height bars.
     """
 
-    def __init__(self, dt, window_s=5.0, min_span=10.0):
+    def __init__(self, dt, window_s=5.0, min_span=10.0, percentile=100.0):
+        if not 0.0 < float(percentile) <= 100.0:
+            raise ValueError("gain_percentile must be in (0, 100]")
         self.n = N_BANDS
         self._min_span = min_span
+        self._percentile = float(percentile)
         maxlen = max(1, int(round(window_s / dt)))
         self._window = deque(maxlen=maxlen)
 
@@ -129,7 +138,12 @@ class AutoCeiling:
         """Consume one frame of per-band peak dB; return the ceiling
         (a float; every band shares it)."""
         self._window.append(max(mag_db))
-        return max(max(self._window), DB_FLOOR + self._min_span)
+        if self._percentile >= 100.0:
+            peak = max(self._window)
+        else:
+            peak = float(np.percentile(
+                np.fromiter(self._window, dtype=float), self._percentile))
+        return max(peak, DB_FLOOR + self._min_span)
 
 
 _HANN = {}

@@ -100,6 +100,52 @@ def test_engine_uses_the_configured_smoothing():
     assert all(lv == 0 for lv in fast._levels(quiet, state_fast))
 
 
+def test_invalid_gain_percentile_rejected():
+    with pytest.raises(ValueError):
+        Equalizer(gain_percentile=0)
+    with pytest.raises(ValueError):
+        Equalizer(gain_percentile=101)
+
+
+def test_engine_gain_percentile_survives_a_rate_change():
+    """--gain-percentile is stored and threaded into a fresh tracker when
+    the capture rate (and therefore dt) changes."""
+    eq = Equalizer(gain_percentile=95.0, overlap=0)
+    assert eq._auto._percentile == 95.0
+    eq._set_rate(44100)
+    assert eq._auto._percentile == 95.0
+    assert eq._auto._window.maxlen == max(1, round(eq.gain_window / eq.dt))
+
+
+def test_engine_percentile_ignores_a_transient():
+    """A single loud frame does not squash the bars with percentile 95,
+    while the default (100) keeps the transient as the window's ceiling."""
+    loud = [DB_CEIL] * N_BANDS
+    steady = [DB_FLOOR + 20.0] * N_BANDS
+    p95 = Equalizer(auto_gain=True, gain_percentile=95.0, overlap=0)
+    maxed = Equalizer(auto_gain=True, overlap=0)
+    for _ in range(20):
+        p95._levels(steady, [0.0] * N_BANDS)
+        maxed._levels(steady, [0.0] * N_BANDS)
+    p95._levels(loud, [0.0] * N_BANDS)
+    maxed._levels(loud, [0.0] * N_BANDS)
+    # The transient is ~5 % of the window: the 95th percentile still sits
+    # at the steady envelope, the max ceiling is the transient.
+    assert p95._auto.update(steady) == pytest.approx(DB_FLOOR + 20.0)
+    assert maxed._auto.update(steady) == pytest.approx(DB_CEIL)
+
+
+def test_cli_gain_percentile_flag():
+    """--gain-percentile defaults to 100 (the existing max behaviour) and
+    is forwarded to the engine."""
+    from pypixel_eq.__main__ import build_parser
+    args = build_parser().parse_args([])
+    assert args.gain_percentile == 100.0
+    custom = build_parser().parse_args(["--gain-percentile", "95"])
+    assert custom.gain_percentile == 95.0
+    assert Equalizer(gain_percentile=custom.gain_percentile)._auto._percentile == 95.0
+
+
 def test_cli_attack_and_release_flags():
     """--attack/--release default to the module tunables and are forwarded."""
     from pypixel_eq.__main__ import build_parser

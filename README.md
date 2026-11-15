@@ -149,9 +149,18 @@ stays proportionally scaled to it — a quiet band does NOT grow to its own peak
 can fall back to 0); only the ceiling adapts. A silent signal never gets
 full-height bars (the span is floored at 10 dB).
 
+`--gain-percentile` chooses which value of the window becomes that ceiling.
+The default 100 is the maximum, so a single loud transient lifts the scale for
+the whole window and the other bars drop ("pumping"). A lower value such as 95
+ignores the loudest 5 % of frames: one hit no longer squashes every bar, it
+just clamps at level 15 itself.
+
 ```bash
 # default: auto-gain on
 uv run python -m pypixel_eq --gui
+
+# ignore the loudest 5 % of frames (punchy transients stop pumping):
+uv run python -m pypixel_eq --gui --gain-percentile 95
 
 # fixed -70/-20 dB span (the old behavior), longer history:
 uv run python -m pypixel_eq --no-auto-gain --gain-window 10
@@ -173,6 +182,7 @@ uv run python -m pypixel_eq --no-auto-gain --gain-window 10
 | `--no-response` | Write BLE chunks without a link-layer response (experiment: lower latency). |
 | `--auto-gain` / `--no-auto-gain` | Bars scale to the recent max over all bands (on by default). |
 | `--gain-window S` | Auto-gain history: seconds of "recent max" (default 2). |
+| `--gain-percentile P` | Which value of the gain window maps to level 15 (default 100 = max; 95 ignores the loudest 5 % of frames). |
 | `--test` | Synthetic 11-band stimulus (no audio device needed). |
 | `--verbose` | DEBUG logging (BLE traffic, sends, notifies). |
 

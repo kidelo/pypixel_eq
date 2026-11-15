@@ -54,8 +54,9 @@ class Equalizer:
 
     def __init__(self, address=None, width=64, height=16, transport="png",
                  rhythm_style=0, send_hz=0.0, auto_gain=True,
-                 gain_window=5.0, overlap=0, queue_size=1,
-                 write_with_response=True, attack=ATTACK, release=RELEASE):
+                 gain_window=5.0, gain_percentile=100.0, overlap=0,
+                 queue_size=1, write_with_response=True,
+                 attack=ATTACK, release=RELEASE):
         self.address = address
         self.width = width
         self.height = height
@@ -107,7 +108,13 @@ class Equalizer:
         # scaled to it - instead of the fixed DB_FLOOR/DB_CEIL span.
         self.auto_gain = auto_gain
         self.gain_window = gain_window
-        self._auto = AutoCeiling(self.dt, window_s=gain_window)
+        # Which value of the recent window becomes level 15: 100 = the max
+        # (a single transient lifts the scale for the whole window), 95 =
+        # ignore the loudest 5 % of frames so one hit stops squashing every
+        # bar. Validated by AutoCeiling.
+        self.gain_percentile = gain_percentile
+        self._auto = AutoCeiling(self.dt, window_s=gain_window,
+                                 percentile=gain_percentile)
 
     def start(self, test=False):
         self._test = test
@@ -142,7 +149,8 @@ class Equalizer:
         """Set the capture rate and rebuild the time-based analysis state."""
         self._device_rate = int(rate) or SAMPLE_RATE
         self.dt = self.hop / self._device_rate
-        self._auto = AutoCeiling(self.dt, window_s=self.gain_window)
+        self._auto = AutoCeiling(self.dt, window_s=self.gain_window,
+                                 percentile=self.gain_percentile)
 
     def _put_note(self, note):
         """Post a status note without ever evicting a pending frame."""
