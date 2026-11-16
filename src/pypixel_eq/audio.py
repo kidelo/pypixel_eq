@@ -27,31 +27,11 @@ DB_FLOOR = -70.0        # mapped to level 0
 DB_CEIL = -20.0         # mapped to level 15
 ATTACK  = 0.001         # seconds to rise to a new level
 RELEASE = 0.050         # seconds to fall
-LLOUD_FLOOR = -50.0     # loudness (dBFS) read as the minimum brightness
-LLOUD_CEIL  = -3.0      # loudness (dBFS) read as the maximum brightness
-BATTACK = 0.010         # seconds for the brightness to rise
-BRELEASE = 0.750        # seconds for the brightness to fall
-BSTEP = 10.0            # panel brightness must move this far (%) before a write
-# Kick detection (bass mode): a high-rate onset detector, decoupled from the
-# 2048-sample band analysis. The window is the analysis frame (so the bass
-# is resolved and a sustained drone is edge-only), but it is stepped at a
-# short hop, so an onset is seen a few ms after it happens - a steep flash
-# instead of one smeared over the 85 ms window.
-KICK_WIN = FRAME        # FFT window (23.4 Hz/bin: resolves the kick zone)
-KICK_HOP = 256          # step: 5.3 ms @ 48 kHz -> 187.5 Hz analysis rate
-KICK_Z0 = 1             # lowest kick bin (23.4 Hz, skips DC)
-KICK_Z1 = 4             # highest kick bin (up to 94 Hz)
-KICK_DELTA = 5.0        # onset threshold: flux must exceed this * EMA
-KICK_FLOOR = 2.0        # absolute flux floor (full-scale ref.), a noise gate
-KICK_REFRAC = 0.25      # minimum seconds between flashes (one per hit)
-KICK_WARMUP = 0.5       # seconds to observe before the detector may fire
-                          # (a steady level's per-hop flux is phase-noise,
-                          # not an onset; the EMA must settle above it
-                          # first, or the first bassline hit after connect
-                          # flashes once)
-KICK_EMA_TAU = 1.5      # seconds, adaptive-threshold memory
-KICK_TAU = 0.25         # seconds, flash decay time constant
-KICK_STEP = 1.0         # % brightness step before a flash/decay write
+LLOUD_FLOOR = -40.0     # loudness (dBFS) read as the minimum brightness
+LLOUD_CEIL  = -10.0     # loudness (dBFS) read as the maximum brightness
+BATTACK = 0.001         # seconds for the brightness to rise
+BRELEASE = 0.050        # seconds for the brightness to fall
+BSTEP = 5.0             # panel brightness must move this far (%) before a write
 
 def find_loopback_input(p):
     """Return (device_index, name) of the input mirroring the current output.
