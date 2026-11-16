@@ -19,7 +19,7 @@ import numpy as np
 
 # Tunables
 SAMPLE_RATE = 48000
-FRAME = 2048            # samples per analysis window (~85 ms @ 48 kHz)
+FRAME = 2048            # samples per analysis window (~43 ms @ 48 kHz)
 N_BANDS = 11            # one band per level l1..l11
 BAND_LO = 20.0          # Hz, first band edge
 BAND_HI = 12000.0       # Hz, last band edge
@@ -52,7 +52,6 @@ KICK_WARMUP = 0.5       # seconds to observe before the detector may fire
 KICK_EMA_TAU = 1.5      # seconds, adaptive-threshold memory
 KICK_TAU = 0.25         # seconds, flash decay time constant
 KICK_STEP = 1.0         # % brightness step before a flash/decay write
-
 
 def find_loopback_input(p):
     """Return (device_index, name) of the input mirroring the current output.

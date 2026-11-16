@@ -245,7 +245,7 @@ def rhythm_payload(levels, style=0):
     0..15) - protocol type 2, ``[16,0,1,2,<style>,l1..l11]``.
 
     The panel draws the bars itself from the level stream, so only the 11
-    level bytes are sent. The command sets requires_ack=True, but like the
+    level bytes are sent. The command sets requires_ack=False, but like the
     image path the panel does not ACK these; we re-wrap fire-and-forget at
     send time. Returns (n_points, payload) with n_points = number of
     levels.

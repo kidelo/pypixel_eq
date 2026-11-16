@@ -216,7 +216,7 @@ class Equalizer:
     def _put(self, item):
         """Enqueue an item, dropping the OLDEST when the queue is full.
 
-        The GUI drains at its own pace (one frame per ~85 ms tick); if it
+        The GUI drains at its own pace (one frame per ~40 ms tick); if it
         lags (a tkinter hiccup, window drag, or accumulation) the bounded
         queue fills. Frames are ephemeral - the panel is the real display
         and the GUI is only a mirror - so a full queue drops the oldest
