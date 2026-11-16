@@ -27,8 +27,7 @@ import numpy as np
 from .audio import (
     SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI, DB_FLOOR, DB_CEIL,
     ATTACK, RELEASE,
-    AutoCeiling, band_centers, BrightnessRamp, KickDetector, KickFlash,
-    find_loopback_input,
+    AutoCeiling, band_centers, BrightnessRamp, find_loopback_input,
     loudness_db, make_band_masks, levels_from_db, tilt_db, analyze_frame,
 )
 from .transport import Device, png_payload, render_image, rhythm_payload
@@ -57,7 +56,7 @@ class Equalizer:
                  rhythm_style=0, send_hz=0.0, auto_gain=True,
                  gain_window=5.0, gain_percentile=100.0, band_stat="peak",
                  tilt=0.0, brightness_min=100, brightness_max=100,
-                 brightness_mode="static", bass_sensitivity=1.0,
+                 brightness_mode="static",
                  overlap=0, queue_size=1,
                  write_with_response=True,
                  attack=ATTACK, release=RELEASE):
@@ -146,29 +145,24 @@ class Equalizer:
             raise ValueError("brightness must be 0..100")
         self.brightness = brightness_min
         self.brightness_max = brightness_max
-        if brightness_mode not in ("static", "auto", "bass"):
+        if brightness_mode == "bass":
+            brightness_mode = "auto"
+            brightness_source = "bass"
+        elif brightness_mode == "auto":
+            brightness_source = "loudness"
+        elif brightness_mode == "static":
+            brightness_source = "loudness"
+        else:
             raise ValueError(
                 "brightness_mode must be 'static', 'auto' or 'bass'")
         self.brightness_mode = brightness_mode
+        self.brightness_source = brightness_source
         # The ramp smooths the brightness and only emits a value when it
         # moved far enough; the device is set to the minimum at connect,
         # so the ramp starts there and the first frame neither dips nor
         # jumps. In the static mode it is never fed (the panel holds the
         # connect value).
         self._bright = BrightnessRamp(brightness_min, brightness_max)
-        # Bass mode (kick flashes): the panel sits at the minimum until a
-        # kick fires, then a flash snaps it to the maximum and decays back
-        # over KICK_TAU. The detector runs its own short-hop FFT on the
-        # mono stream (see KickDetector); both are built only here, so the
-        # other modes pay no detection cost.
-        if bass_sensitivity <= 0:
-            raise ValueError("bass_sensitivity must be > 0")
-        self.bass_sensitivity = float(bass_sensitivity)
-        self._kick = None
-        self._flash = None
-        if brightness_mode == "bass":
-            self._kick = KickDetector(bass_sensitivity)
-            self._flash = KickFlash(brightness_min, brightness_max)
 
     def start(self, test=False):
         self._test = test
@@ -291,52 +285,37 @@ class Equalizer:
     def _mark_sent(self):
         self._last_send = time.perf_counter()
 
-    def _kick_feed(self, dev, chunk):
-        """Feed the kick detector (bass mode) with fresh mono samples.
+    def _send_bright(self, dev, buf, levels):
+        """Feed the brightness ramp with the selected audio level.
 
-        On a fire the flash snaps to the peak and the panel is pushed
-        there; the decay back to the base is driven per-frame by
-        ``_send_bright``. A failed write re-raises on the next call, so
-        the reconnect path still runs on the analysis thread.
+        In the auto mode the ramp maps the level between the minimum and
+        maximum and only returns a new value when it has moved far
+        enough (a step, e.g. 5%), so a brightness write is a 5-byte
+        command per actual step only - quiet passages hold the last
+        value, loud/bass hits step up. Source: overall loudness (RMS of
+        the window) by default, or bass presence (B0..B2, ~20-115 Hz)
+        from the current band levels when ``brightness_source`` is
+        ``"bass"``. In the static mode the ramp is never fed and the
+        panel holds the connect value. A failed write is re-raised by
+        ``push_brightness`` on the next call, so the reconnect path
+        still runs on the analysis thread.
         """
-        if self._kick is None:
+        if dev is None or self.brightness_mode != "auto":
             return dev
-        if self._kick.feed(chunk):
-            peak = self._flash.trigger()  # snaps even with no device (GUI)
-            if dev is None or peak is None:
-                return dev
-            try:
-                dev.push_brightness(peak)
-            except Exception as e:
-                self._put_note(f"brightness send failed ({e}) - reconnecting")
-                return self._reconnect(dev)
-        return dev
-
-    def _send_bright(self, dev, buf):
-        """Advance the panel brightness for this frame.
-
-        Three modes, each a different driver but the same writer:
-          - static: nothing is fed; the panel holds the connect value.
-          - auto: the ramp maps the overall level between the minimum and
-            maximum and only returns a new value when it has moved far
-            enough (a step), so a brightness write is one 5-byte command
-            per actual step - quiet passages hold the last value, loud
-            ones step up.
-          - bass: the flash decays back to the base after each kick
-            (triggered in ``_kick_feed``); it returns a value only while
-            the decay has moved a full step, so the flash is one short
-            staircase and the panel holds the base in between.
-        A failed write is re-raised by ``push_brightness`` on the next
-        call, so the reconnect path still runs on the analysis thread.
-        """
-        if dev is None:
-            return dev
-        if self.brightness_mode == "bass":
-            to_send = self._flash.update(self.dt)
-        elif self.brightness_mode == "auto":
-            to_send = self._bright.update(self.dt, loudness_db(buf))
+        if self.brightness_source == "bass":
+            # Bass presence from the displayed band levels (0-15), derived
+            # from the current peak/rms analysis: reacts to whether bass
+            # is there, even in quiet passages, instead of absolute dB.
+            bass = max((max(0.0, min(15.0, float(lv))) for lv in levels[:3]),
+                       default=0.0)
+            from .audio import LLOUD_FLOOR, LLOUD_CEIL
+            level = LLOUD_FLOOR + (bass / 15.0) * (LLOUD_CEIL - LLOUD_FLOOR)
         else:
-            return dev
+            level = loudness_db(buf)
+        to_send = self._bright.update(self.dt, level)
+        logger.debug(
+            "brightness[%s] level=%.2f value=%s send=%s",
+            self.brightness_source, level, self._bright.value, to_send)
         if to_send is None:
             return dev
         try:
@@ -351,14 +330,11 @@ class Equalizer:
     def current_brightness(self):
         """The panel brightness the view should show (0..100).
 
-        The auto mode follows the ramp (which tracks the loudness), the
-        bass mode the flash (which decays back to the base after each
-        kick); otherwise the fixed connect value (the minimum).
+        The auto mode follows the ramp (which tracks the audio level);
+        otherwise the fixed connect value (the minimum).
         """
         if self.brightness_mode == "auto":
             return self._bright.value
-        if self.brightness_mode == "bass":
-            return self._flash.value
         return self.brightness
 
     def _connect_device(self):
@@ -376,13 +352,9 @@ class Equalizer:
             self._put_note(f"connect failed ({e}) - display only")
             return None
         self.width, self.height = dev.width, dev.height
-        # The device was set to the minimum at connect: re-sync the
-        # trackers (auto ramp, bass kick detector + flash), which
-        # otherwise still hold their last value.
+        # The device was set to the minimum at connect: re-sync the ramp
+        # (auto mode), which otherwise still holds its last value.
         self._bright.reset()
-        if self._kick is not None:
-            self._kick.reset()
-            self._flash.reset()
         self._put_note(
             f"connected ({self.width}x{self.height}, "
             f"{self.transport} transport)")
@@ -414,12 +386,8 @@ class Equalizer:
                 delay = min(delay * 2.0, 10.0)
                 continue
             self.width, self.height = new.width, new.height
-            # The link is fresh and set to the minimum: re-sync the
-            # trackers (auto ramp, bass kick detector + flash).
+            # The link is fresh and set to the minimum: re-sync the ramp.
             self._bright.reset()
-            if self._kick is not None:
-                self._kick.reset()
-                self._flash.reset()
             self._put_note(f"reconnected ({self.width}x{self.height})")
             return new
         if dev is not None:
@@ -511,17 +479,12 @@ class Equalizer:
                     amp = 10.0 ** (db / 20.0)
                     new += amp * np.sin(2 * np.pi * freqs[b] * ts)
                 buf[FRAME - to_read:] = new
-                # Kick detection (bass mode): the new samples feed their
-                # own short-hop detector, independent of the band
-                # analysis - the test stimulus's low band breathes into
-                # the kick zone, so flashes are visible without music.
-                dev = self._kick_feed(dev, new)
                 mag_db = self._analyze(buf, masks, full_scale)
                 levels = self._levels(mag_db, state)
                 img, n_points, payload = self._payload(levels, mag_db)
 
                 dev, send_ms = self._send(dev, payload)
-                dev = self._send_bright(dev, buf)
+                dev = self._send_bright(dev, buf, levels)
                 if send_ms is not None:
                     now = time.time()
                     if now - t_last >= 2.0:
@@ -587,15 +550,12 @@ class Equalizer:
                     mono = samples
                 buf[FRAME - to_read:] = mono[:to_read]
                 n_read += to_read
-                # Kick detection (bass mode): the mono stream feeds its own
-                # short-hop detector, independent of the band analysis.
-                dev = self._kick_feed(dev, mono[:to_read])
                 mag_db = self._analyze(buf, masks, full_scale)
                 levels = self._levels(mag_db, state)
                 img, n_points, payload = self._payload(levels, mag_db)
 
                 dev, send_ms = self._send(dev, payload)
-                dev = self._send_bright(dev, buf)
+                dev = self._send_bright(dev, buf, levels)
                 if send_ms is not None:
                     now = time.time()
                     if now - t_last >= 2.0:

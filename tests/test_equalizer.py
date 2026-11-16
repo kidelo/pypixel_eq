@@ -240,11 +240,10 @@ def test_cli_tilt_flag():
 
 
 def test_cli_brightness_flags():
-    """--brightness-min/--brightness-max default to 100/100 (the panel's
-    own value, unchanged) and are forwarded to the engine."""
+    """--brightness-min/--brightness-max defaults and forwarding."""
     from pypixel_eq.__main__ import build_parser
     args = build_parser().parse_args([])
-    assert args.brightness_min == 100
+    assert args.brightness_min == 1
     assert args.brightness_max == 100
     assert args.brightness_mode == "static"
     custom = build_parser().parse_args(
@@ -298,89 +297,12 @@ def test_cli_brightness_mode_flag():
     assert eq._bright.bmax == 100
 
 
-def test_cli_bass_mode_flag():
-    """--brightness-mode accepts bass (default still static) and
-    --bass-sensitivity defaults to 1.0; both are forwarded to the engine."""
-    from pypixel_eq.__main__ import build_parser
-    args = build_parser().parse_args([])
-    assert args.brightness_mode == "static"  # default unchanged
-    assert args.bass_sensitivity == 1.0
-    custom = build_parser().parse_args(
-        ["--brightness-mode", "bass", "--bass-sensitivity", "2.0"])
-    assert custom.brightness_mode == "bass"
-    assert custom.bass_sensitivity == 2.0
-    eq = Equalizer(brightness_mode="bass", bass_sensitivity=2.0)
-    assert eq.brightness_mode == "bass"
-    assert eq.bass_sensitivity == 2.0
-    # The stored sensitivity reaches the detector.
-    assert eq._kick.sensitivity == 2.0
-
-
-def test_bass_mode_builds_detector_and_flash_only_in_bass():
-    """Bass mode builds the kick detector + flash; the other modes pay
-    no detection cost (they are None)."""
-    assert Equalizer(brightness_mode="bass")._kick is not None
-    assert Equalizer(brightness_mode="bass")._flash is not None
-    for mode in ("static", "auto"):
-        eq = Equalizer(brightness_mode=mode)
-        assert eq._kick is None
-        assert eq._flash is None
-
-
-def test_bass_mode_invalid_sensitivity_rejected():
-    for bad in (0, -1.0):
-        with pytest.raises(ValueError):
-            Equalizer(brightness_mode="bass", bass_sensitivity=bad)
-
-
-def test_bass_mode_current_brightness_is_the_flash_value():
-    """current_brightness follows the flash (which decays back to the
-    base after each kick); the view dims from it."""
-    eq = Equalizer(brightness_min=10, brightness_max=100,
-                   brightness_mode="bass")
-    assert eq.current_brightness == 10  # at the base
-    eq._flash.trigger()
-    assert eq.current_brightness == 100  # at the peak
-
-
-def test_bass_mode_kick_feeds_and_pushes_the_flash():
-    """A fired kick snaps the panel to the peak (a write), and the decay
-    back to the base is driven per-frame by _send_bright - so a kick
-    produces a flash, not a ramp. Silence produces no writes."""
-    eq = Equalizer(brightness_min=10, brightness_max=100,
-                   brightness_mode="bass")
-    dev = _BrightStub()
-    sr = audio.SAMPLE_RATE
-    # Warm the detector past its warm-up with silence (no fire).
-    for i in range(0, int(3 * sr), 1024):
-        eq._kick_feed(dev, np.zeros(1024))
-    assert dev.pushed == []  # silence does not flash
-    # A kick fires: the panel is pushed to the peak instantly.
-    n = int(0.12 * sr)
-    ts = np.arange(n) / sr
-    kick = 0.8 * np.exp(-ts / 0.035) * np.sin(2 * np.pi * 60.0 * ts)
-    for i in range(0, len(kick), 1024):
-        eq._kick_feed(dev, kick[i:i + 1024])
-    assert dev.pushed and dev.pushed[0] == 100  # snap to the peak
-    # The decay is driven per-frame by _send_bright (the flash).
-    dummy = np.zeros(audio.FRAME)
-    for _ in range(200):
-        eq._send_bright(dev, dummy)
-    # The decay walked back to the base.
-    assert 10 in dev.pushed
-    # Silence frames produce no further writes once settled.
-    n_settled = len(dev.pushed)
-    for _ in range(50):
-        eq._send_bright(dev, dummy)
-    assert len(dev.pushed) == n_settled
-
-
 def test_static_mode_leaves_device_brightness_untouched():
     """In static mode the ramp is never fed and no brightness command
     rides on a frame (the fixed minimum is set once at connect)."""
     eq = Equalizer(brightness_min=100)  # static
     dev = _BrightStub()
-    out = eq._send_bright(dev, np.zeros(audio.FRAME))
+    out = eq._send_bright(dev, np.zeros(audio.FRAME), [audio.DB_FLOOR] * audio.N_BANDS)
     assert out is dev
     assert dev.pushed == []
     # current_brightness is the fixed value.
@@ -392,19 +314,23 @@ def test_auto_mode_sends_only_on_a_step():
     level moved at least ``step`` from the last value sent - the panel
     holds whatever it has in between."""
     eq = Equalizer(brightness_min=50, brightness_max=100,
-                   brightness_mode="auto")
+                   brightness_mode="bass")
     dev = _BrightStub()
-    loud = np.full(audio.FRAME, 0.707)
+    buf = np.zeros(audio.FRAME)
+    # Loud bass: B0..B2 (20-115 Hz) drive the brightness via the
+    # current band levels (0..15), so bass presence reacts even when
+    # overall loudness is low.
+    loud = [15, 15, 15] + [0] * (audio.N_BANDS - 3)
     # Loud: the level rises and the brightness steps up toward the max.
     for _ in range(200):
-        eq._send_bright(dev, loud)
-    assert dev.pushed, "loudness must step the brightness up"
+        eq._send_bright(dev, buf, loud)
+    assert dev.pushed, "bass level must step the brightness up"
     # Settled near the maximum (a residual of less than one step remains).
     assert 96 < dev.pushed[-1] <= 100
     # The panel now holds that value; a further loud frame moves < step,
     # so no new command is sent.
     n = len(dev.pushed)
-    eq._send_bright(dev, loud)
+    eq._send_bright(dev, buf, loud)
     assert len(dev.pushed) == n
     # A reconnect resets the ramp to the minimum (set at connect).
     eq._bright.reset()
