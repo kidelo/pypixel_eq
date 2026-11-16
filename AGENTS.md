@@ -202,9 +202,6 @@ Notes:
 - **PC-3** — `requires-python = ">=3.9"` is advertised, but PEP 604 unions in
   `lib/transport/send_plan.py` and `commands/send_text/encoding.py` need 3.10
   without `from __future__ import annotations`.
-- **PC-4** — `set_rhythm_mode` requests an ACK the panel never sends; the EQ
-  rebuilds a no-ACK plan as a workaround.
-- **PC-6** — `Client.connect()` docs promise device info but return `None`.
 - **PC-7** — stub generator omits `write_with_response` and the newer
   `send_plan` / `send_payload` methods.
 - **PC-8** — expose `connect_scan_timeout`, `ack_timeout`, `is_connected`,
@@ -225,8 +222,6 @@ Notes:
 ### pypixel-eq
 
 - **EQ-15** — `--scan` / `--list-devices` via the client scanner.
-- **EQ-17** — separate sender thread/queue if BLE latency stretches the
-  analysis period (the loop-period watchdog already reports it).
 
 ### Protocol quirks (decide whether to address)
 
@@ -257,6 +252,9 @@ camera (type 0), TEM/subzone (type 7), rhythm-chart completeness.
 |---|---|
 | EQ-1 … EQ-14 | Fixed: CLI default vs docs, `dt` from the real device rate, GUI rescheduling, reconnect with backoff, stereo downmix, stream/device cleanup, Hann cache, connect before capture, shared payload/send path, pure `_should_send`, single frame counter, status units, best-effort notes, `bar_color` comment. |
 | EQ-16 | Tests for `dt` at 44.1 kHz, downmix, CLI defaults, reconnect, GUI errors, orphan cleanup. |
+| EQ-17 | Sender runs on a background writer thread + queue (`_PayloadSender`, newest wins); BLE latency no longer stalls the analysis loop. |
+| PC-4 | `set_rhythm_mode` is fire-and-forget (the panel never ACKs mode writes); the EQ no longer rebuilds a no-ACK plan. |
+| PC-6 | `Client.connect()` returns `DeviceInfo` (retrieved and cached during connect). |
 | PC-1 | `set_pixel` colour validation fixed. |
 | PC-2 | `set_clock_mode` accepts 4-digit years, validates the real calendar. |
 | PC-5 | `DeviceSession.connect()` can no longer leave a half-open connection. |
