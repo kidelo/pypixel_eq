@@ -8,8 +8,8 @@ Audio-reactive equalizer for an [iPixel Color](https://ipixel.com.tw/) LED
 panel. It captures the system audio output, analyzes it into **11 log-spaced
 frequency bands** (20 Hz – 12 kHz) and streams the result to the panel over
 BLE — either as band levels for the panel's own visualizer, or as rendered
-64×16 frames. The panel's own brightness can follow the music too (a dim
-loudness ramp, or a kick flash on the bass).
+64×16 frames. The panel's own brightness can follow the music too (following the
+overall loudness, or the bass level).
 
 ![Equalizer bars rendered for a 64×16 panel](docs/banner.png)
 
@@ -21,7 +21,7 @@ loudness ramp, or a kick flash on the bass).
 - Two transports: `rhythm` (16 bytes/frame, panel draws the bars) and `png`
   (rendered frame, true full replace, stable 10 fps).
 - **Panel brightness control** over the panel's own hardware brightness:
-  `static` (fixed), `auto` (follows the loudness), or `bass` (kick flashes).
+  `static` (fixed), `auto` (follows the loudness), or `bass` (follows bass level).
 - **Non-blocking writer**: frames are handed to a background thread (newest
   wins), so BLE latency never stalls the audio analysis.
 - Reconnects automatically with backoff; the GUI and analysis keep running.
@@ -87,8 +87,7 @@ panel while showing the emulation; without it, it shows the view only.
 | Just a clean visualizer | `uv run python -m pypixel_eq -a <MAC>` (defaults) |
 | A rendered image instead of the panel's bars | add `--transport png` |
 | Dim the panel when it's quiet, bright when loud | add `--brightness-mode auto --brightness-min 20 --brightness-max 100` |
-| A dark panel that flashes on the kick | add `--brightness-mode bass --brightness-min 10` |
-| Only the hardest kicks flash (calmer) | `--bass-sensitivity 3.0` (higher = fewer flashes) |
+| Follow the bass (B0..B2) with panel brightness | add `--brightness-mode bass --brightness-min 1 --brightness-max 100` |
 | Slower, smoother bars | `--release 0.2` |
 | Punchy transients stop squashing every bar | `--gain-percentile 95` |
 | Warmer / brighter balance | `--tilt -1` / `--tilt +1` |
@@ -115,7 +114,7 @@ system audio ─► WASAPI/monitor ─► Hann-windowed FFT (2048) ─► 11 ban
        ─► render (png only) ─► payload ─► background writer ─► BLE
 ```
 
-### Panel brightness (`--brightness-min PCT`, `--brightness-max PCT`, default 100)
+### Panel brightness (`--brightness-min PCT`, `--brightness-max PCT`)
 
 Sets the panel's own brightness — a hardware command, not image dimming.
 Unlike image scaling it also works for the `rhythm` transport (the panel
@@ -125,21 +124,20 @@ brightness control that covers both transports.
 The panel keeps its last display across BLE links, so the value is sent
 at connect and after every reconnect: run `--brightness-min 30` once and
 it stays 30 on the next run too (connect blanks the display, then the
-brightness is raised). 100 is the panel's own default and the unchanged
-behaviour.
+brightness is raised). 100 is the panel's own hardware default.
 
 | mode (`--brightness-mode`) | behaviour |
 |---|---|
 | `static` (default) | the panel holds `--brightness-min`. |
-| `auto` | the brightness follows the overall loudness: quiet passages fall to `--brightness-min` (-50 dBFS), loud ones rise to `--brightness-max` (-3 dBFS), in between they are linear. The panel only receives a write when the level has moved a full step, so quiet passages hold their value and loud ones step up. |
-| `bass` | the panel sits at `--brightness-min` (dark) and flashes to `--brightness-max` on each kick, decaying back over ~0.25 s. A kick detector runs its own short-hop FFT on the mono stream: only the lowest frequency bins count, a sustained bass line (no onset) never fires, and the adaptive threshold means `--bass-sensitivity` only changes which hits register over an active bassline (higher = fewer flashes). |
+| `auto` | the brightness follows the overall loudness: quiet passages fall to `--brightness-min` (-40 dBFS), loud ones rise to `--brightness-max` (-10 dBFS), in between they are linear. The panel only receives a write when the level has moved a full step (~5 %), so quiet passages hold their value and loud ones step up. |
+| `bass` | the brightness follows the bass level (B0..B2, ~20-115 Hz) derived from the current band levels: quiet bass falls toward `--brightness-min`, strong bass rises toward `--brightness-max`, updated only on ~5 % steps. |
 
 ```bash
 uv run python -m pypixel_eq -a <MAC> --brightness-min 30
 uv run python -m pypixel_eq -a <MAC> --brightness-mode auto \
      --brightness-min 20 --brightness-max 100
 uv run python -m pypixel_eq -a <MAC> --brightness-mode bass \
-     --brightness-min 10 --bass-sensitivity 1.0
+     --brightness-min 1 --brightness-max 100
 ```
 
 ### Panel update rate (`--overlap` 0-2, default 0)
@@ -294,10 +292,9 @@ uv run python -m pypixel_eq --no-auto-gain --gain-window 10
 | `--gain-window S` | Auto-gain history: seconds of "recent max" (default 2). |
 | `--gain-percentile P` | Which value of the gain window maps to level 15 (default 100 = max; 95 ignores the loudest 5 % of frames). |
 | **Brightness** | |
-| `--brightness-min PCT` | Panel brightness 0..100 (default 100). Static: the fixed value, set at connect and after every reconnect. Auto: the brightness at a quiet level (-50 dBFS). Bass: the dark base the flash decays back to. |
-| `--brightness-max PCT` | Panel brightness 0..100 (default 100). Auto: the ceiling at a loud level (-3 dBFS). Bass: the peak the flash snaps to. Ignored in static mode. |
-| `--brightness-mode MODE` | `static` (default, holds the minimum), `auto` (follows the loudness) or `bass` (kick flashes: dark base, flash to the maximum on each hit, decay back). |
-| `--bass-sensitivity F` | Kick-detection threshold scale (default 1.0, bass mode only): higher = only strong kicks flash (fewer flashes), lower = softer kicks flash too. |
+| `--brightness-min PCT` | Panel brightness 0..100 (default 1). Static: the fixed value, set at connect and after every reconnect. Auto/bass: the brightness at a quiet level (-40 dBFS). |
+| `--brightness-max PCT` | Panel brightness 0..100 (default 100). Auto/bass: the ceiling at a loud level (-10 dBFS). Ignored in static mode. |
+| `--brightness-mode MODE` | `static` (default, holds the minimum), `auto` (follows overall loudness), or `bass` (follows bass level, B0..B2 ~20-115 Hz). Auto/bass map between the minimum and maximum, updated only on ~5 % steps. |
 | **Debug** | |
 | `--verbose` | DEBUG logging (BLE traffic, sends, notifies). |
 
@@ -313,9 +310,7 @@ uv run pytest pypixelcolor/tests -q   # the pinned library fork
 
 Coverage: band masks partition the FFT bins, a single tone peaks in its own
 band, quiet → level 0, attack/release timing, stereo downmix, `dt` at 44.1 kHz,
-reconnect behaviour, GUI error rescheduling, kick detection (a steady bass
-line never fires, a hit does, one fire per beat, high-frequency onsets and
-noise rejected), and byte-identical `rhythm` / `png` payloads against the
+reconnect behaviour, GUI error rescheduling, and byte-identical `rhythm` / `png` payloads against the
 fork's command builders.
 
 ## Troubleshooting
@@ -326,7 +321,6 @@ fork's command builders.
 | Connects but nothing changes on the panel | Try `--transport png` once. If that works, the rhythm preset is hiding the effect (`--rhythm-style 0..4`). |
 | Panel flickers | Stay at the default `rhythm` transport, or lower `--fps`; the image path is only stable up to 10 fps. |
 | Levels barely move | Check the Windows output device (loopback follows the **default** output), disable `--no-auto-gain`, or raise `--overlap`. |
-| No kick flashes in `bass` mode | The kick needs a *hit*, not a level: a steady bass line never fires. Try a track with a clear kick, or lower `--bass-sensitivity`. The panel also sits dark for the first ~0.5 s after connect before the detector may fire. |
 | No audio device | Use `--test` to verify the rest of the pipeline. |
 | Installed code lacks a command | `uv sync` — the venv may still hold an older build of the submodule. |
 
@@ -346,7 +340,7 @@ fork's command builders.
 pypixel_eq/
 ├── pypixelcolor/          # submodule -> kidelo/pypixelcolor-ext @ pinned commit
 ├── src/pypixel_eq/
-│   ├── audio.py           # capture + FFT -> 11 band levels, brightness/kick
+│   ├── audio.py           # capture + FFT -> 11 band levels, brightness
 │   ├── transport.py       # payload builders + non-blocking Device writer
 │   ├── equalizer.py       # worker-thread engine (capture -> render -> send)
 │   ├── gui.py             # live tkinter view (bands + panel emulation)
