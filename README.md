@@ -87,7 +87,7 @@ panel while showing the emulation; without it, it shows the view only.
 | Just a clean visualizer | `uv run python -m pypixel_eq -a <MAC>` (defaults) |
 | A rendered image instead of the panel's bars | add `--transport png` |
 | Dim the panel when it's quiet, bright when loud | add `--brightness-mode auto --brightness-min 20 --brightness-max 100` |
-| Follow the bass (B0..B2) with panel brightness | add `--brightness-mode bass --brightness-min 1 --brightness-max 100` |
+| Follow the bass (default B0..B2, configurable) with panel brightness | add `--brightness-mode bass --brightness-min 1 --brightness-max 100` |
 | Slower, smoother bars | `--release 0.2` |
 | Punchy transients stop squashing every bar | `--gain-percentile 95` |
 | Warmer / brighter balance | `--tilt -1` / `--tilt +1` |
@@ -103,8 +103,10 @@ panel while showing the emulation; without it, it shows the view only.
 
 Both transports are **fire-and-forget** (no panel protocol ACK is awaited):
 the panel does not reliably ACK these writes, and waiting for one stalls the
-frame loop. `--queue N` sets how many frames may wait for the radio
-(default 1; the oldest unsent frame is dropped).
+frame loop. Data frames are prioritized over brightness commands; each uses a
+single latest-wins slot (queue depth 1, older unsent items are discarded). Under
+sustained data load a pending brightness command is still sent at most once per
+`--brightness-interval` seconds (default 1.0) so it cannot starve.
 
 ## How it works
 
@@ -130,7 +132,7 @@ brightness is raised). 100 is the panel's own hardware default.
 |---|---|
 | `static` (default) | the panel holds `--brightness-min`. |
 | `auto` | the brightness follows the overall loudness: quiet passages fall to `--brightness-min` (-40 dBFS), loud ones rise to `--brightness-max` (-10 dBFS), in between they are linear. The panel only receives a write when the level has moved a full step (~5 %), so quiet passages hold their value and loud ones step up. |
-| `bass` | the brightness follows the bass level (B0..B2, ~20-115 Hz) derived from the current band levels: quiet bass falls toward `--brightness-min`, strong bass rises toward `--brightness-max`, updated only on ~5 % steps. |
+| `bass` | the brightness follows the bass level derived from the selected band levels (default B0..B2, ~20-115 Hz, set with `--brightness-bass-bands`): quiet bass falls toward `--brightness-min`, strong bass rises toward `--brightness-max`, updated only on ~5 % steps. |
 
 ```bash
 uv run python -m pypixel_eq -a <MAC> --brightness-min 30
@@ -281,7 +283,6 @@ uv run python -m pypixel_eq --no-auto-gain --gain-window 10
 | `--rhythm-style N` | Rhythm-transport panel preset 0..4 (default 0). |
 | `--fps F` | Throttle device writes to F/s (0 = every frame for `rhythm`, the stable 10 fps for `png`; analysis rate unchanged). |
 | `--overlap N` | Panel update rate: 23.4 Hz x (1+N), N = 0..2 (default 0 = 23.4 Hz). |
-| `--queue N` | Frames that may wait for the BLE write (default 1; oldest unsent frame is dropped). |
 | `--no-response` | Write BLE chunks without a link-layer response (experiment: lower latency). |
 | **Bars** | |
 | `--band-stat peak\|rms` | Per-band value: `peak` (default, loudest bin) or `rms` (total band power: steadier, lifts broadband highs). |
@@ -294,7 +295,9 @@ uv run python -m pypixel_eq --no-auto-gain --gain-window 10
 | **Brightness** | |
 | `--brightness-min PCT` | Panel brightness 0..100 (default 1). Static: the fixed value, set at connect and after every reconnect. Auto/bass: the brightness at a quiet level (-40 dBFS). |
 | `--brightness-max PCT` | Panel brightness 0..100 (default 100). Auto/bass: the ceiling at a loud level (-10 dBFS). Ignored in static mode. |
-| `--brightness-mode MODE` | `static` (default, holds the minimum), `auto` (follows overall loudness), or `bass` (follows bass level, B0..B2 ~20-115 Hz). Auto/bass map between the minimum and maximum, updated only on ~5 % steps. |
+| `--brightness-mode MODE` | `static` (default, holds the minimum), `auto` (follows overall loudness), or `bass` (follows bass level, default B0..B2 ~20-115 Hz; see `--brightness-bass-bands`). Auto/bass map between the minimum and maximum, updated only on ~5 % steps. |
+| `--brightness-bass-bands LO HI` | Bass-brightness band range as inclusive indices 0..10 (default `0 2` = B0..B2, ~20-115 Hz). Only used with `--brightness-mode bass`. |
+| `--brightness-interval SEC` | Minimum seconds between brightness writes under sustained data load (default `1.0`, i.e. at most one brightness change per second; `0` = strict data priority). |
 | **Debug** | |
 | `--verbose` | DEBUG logging (BLE traffic, sends, notifies). |
 

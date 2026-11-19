@@ -4,11 +4,13 @@
 Run:
     python -m pypixel_eq [-a <MAC>] [--gui]
                          [--transport png|rhythm] [--rhythm-style 0]
-                         [--fps F] [--overlap N] [--queue N]
+                         [--fps F] [--overlap N]
                          [--attack S] [--release S] [--gain-percentile P]
                          [--band-stat peak|rms] [--tilt DB_PER_OCT]
                          [--brightness-min PCT] [--brightness-max PCT]
                          [--brightness-mode static|auto|bass]
+                         [--brightness-bass-bands LO HI]
+                         [--brightness-interval SEC]
                          [--no-response] [--test] [--verbose]
 
   -a <MAC>            send to the panel
@@ -22,8 +24,6 @@ Run:
                       (default 0; each level re-analyzes the rolling
                       2048-sample window more often, keeping the same
                       frequency resolution)
-  --queue N           frames that may wait for the BLE write (default 1;
-                      the oldest unsent frame is dropped when full)
   --attack S          seconds for a band to rise to a louder level
                       (default 0.001 = instant)
   --release S         seconds for a band to fall back (default 0.05;
@@ -48,10 +48,14 @@ Run:
                       (-3 dBFS). Ignored in static mode
   --brightness-mode MODE  static (default, holds --brightness-min),
                       auto (brightness follows overall loudness), or
-                      bass (brightness follows bass, B0..B2 ~20-115 Hz).
-                      auto/bass: quiet = dim, loud = bright, between
+                      bass (brightness follows bass level; default
+                      B0..B2 ~20-115 Hz, configurable). auto/bass:
+                      quiet = dim, loud = bright, between
                       --brightness-min and --brightness-max, updated
                       only on ~5% steps
+  --brightness-bass-bands LO HI  bass-brightness band range (inclusive
+                      indices 0..10, default 0 2 = B0..B2); used with
+                      --brightness-mode bass
   --no-response       write BLE chunks without a link-layer response
                       (experiment: lower latency, less reliable)
   --test              feed a synthetic 11-band stimulus instead of
@@ -64,7 +68,7 @@ import sys
 
 from pypixelcolor.lib.logging import setup_logging
 
-from .audio import ATTACK, RELEASE
+from .audio import ATTACK, RELEASE, N_BANDS
 from .equalizer import Equalizer, console_loop
 
 logger = logging.getLogger(__name__)
@@ -106,10 +110,6 @@ def build_parser():
                              "re-analyzes the rolling 2048-sample window "
                              "more often without losing frequency resolution; "
                              "3+ overloads the panel: high bands get damped)")
-    parser.add_argument("--queue", type=int, default=1,
-                        help="frames that may wait for the BLE write "
-                             "(default 1; the oldest unsent frame is "
-                             "dropped when the queue is full)")
     parser.add_argument("--attack", type=float, default=ATTACK,
                         help=f"seconds for a band to rise to a louder level "
                              f"(default {ATTACK:g} s = instant)")
@@ -162,9 +162,21 @@ def build_parser():
                         help="brightness control: static (default, holds "
                              "--brightness-min), auto (follows overall "
                              "loudness), or bass (follows bass level, "
-                             "B0..B2 ~20-115 Hz). auto/bass map between "
-                             "the minimum and maximum, updated only on "
-                             "~5%% steps")
+                             "default B0..B2 ~20-115 Hz; see "
+                             "--brightness-bass-bands). auto/bass map "
+                             "between the minimum and maximum, updated "
+                             "only on ~5%% steps")
+    parser.add_argument("--brightness-bass-bands", nargs=2, type=int,
+                        default=[0, 2], metavar=("LO", "HI"),
+                        help="bass-brightness band range as inclusive "
+                             "indices 0..10 (default 0 2 = B0..B2, "
+                             "~20-115 Hz); used with --brightness-mode "
+                             "bass")
+    parser.add_argument("--brightness-interval", type=float, default=1.0,
+                        help="minimum seconds between brightness writes "
+                             "under sustained data load (default 1.0, so at "
+                             "most one brightness change per second; 0 = "
+                             "strict data priority)")
     parser.add_argument("--test", action="store_true",
                         help="feed a synthetic 11-band stimulus instead of "
                              "capturing system audio (no audio device needed)")
@@ -190,8 +202,6 @@ def main():
         sys.exit("--gain-percentile must be in (0, 100]")
     if not (0 <= args.overlap <= 2):
         sys.exit("--overlap must be 0..2")
-    if args.queue < 1:
-        sys.exit("--queue must be >= 1")
     if args.attack <= 0:
         sys.exit("--attack must be > 0")
     if args.release <= 0:
@@ -202,6 +212,11 @@ def main():
         sys.exit("--brightness-min must be 0..100")
     if not 0 <= args.brightness_max <= 100:
         sys.exit("--brightness-max must be 0..100")
+    if args.brightness_interval < 0:
+        sys.exit("--brightness-interval must be >= 0")
+    lo, hi = args.brightness_bass_bands
+    if not (0 <= lo <= hi < N_BANDS):
+        sys.exit("--brightness-bass-bands must satisfy 0 <= LO <= HI <= 10")
     # Always log at INFO so a "BLE device disconnected" event is visible
     # without any flag; --verbose adds DEBUG (wire traffic, notifies).
     setup_logging("DEBUG" if args.verbose else "INFO")
@@ -219,7 +234,9 @@ def main():
                    brightness_min=args.brightness_min,
                    brightness_max=args.brightness_max,
                    brightness_mode=args.brightness_mode,
-                   overlap=args.overlap, queue_size=args.queue,
+                   brightness_bass_bands=(lo, hi),
+                   brightness_interval=args.brightness_interval,
+                   overlap=args.overlap,
                    write_with_response=args.write_with_response,
                    attack=args.attack, release=args.release)
     try:

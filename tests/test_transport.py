@@ -322,18 +322,18 @@ def test_device_brightness_default_does_not_touch_the_panel(monkeypatch):
 
 
 def test_device_close_stops_sender_before_disconnect(monkeypatch):
-    """The writer must be joined before the link closes, otherwise a frame
-    could be written to a dead session."""
+    """The writer must be joined before the link closes, otherwise a
+    command could be written to a dead session."""
     monkeypatch.setattr(transport, "Client", _FakeClient)
     dev = transport.Device("AA:BB:CC:DD:EE:FF")
     client = dev.client
     dev.update(b"frame")
     assert _wait_for(lambda: "send" in client.events)
     assert _wait_for(lambda: dev.send_ms is not None)
-    sender = dev._sender
+    writer = dev._writer
     dev.close()
     assert client.events.index("send") < client.events.index("disconnect")
-    assert not sender._thread.is_alive()
+    assert not writer.thread.is_alive()
     assert dev.client is None
     # After close an update is a silent no-op, not an error.
     dev.update(b"late")
@@ -342,18 +342,18 @@ def test_device_close_stops_sender_before_disconnect(monkeypatch):
 def test_device_reconnect_replaces_the_writer(monkeypatch):
     monkeypatch.setattr(transport, "Client", _FakeClient)
     dev = transport.Device("AA:BB:CC:DD:EE:FF")
-    first = dev._sender
+    first = dev._writer
     dev.reconnect()
-    assert dev._sender is not first
-    assert not first._thread.is_alive()
+    assert dev._writer is not first
+    assert not first.thread.is_alive()
     dev.update(b"frame")
     assert _wait_for(lambda: dev.send_ms is not None)
     dev.close()
 
 
 def test_device_push_brightness_sends_the_command(monkeypatch):
-    """push_brightness rides the brightness writer and sends the exact
-    brightness command bytes (one 5-byte write per change)."""
+    """push_brightness sends the exact brightness command bytes (one
+    5-byte write per change) via the shared priority writer."""
     from pypixel_eq.transport import brightness_payload
 
     captured = []
@@ -375,3 +375,204 @@ def test_device_push_brightness_sends_the_command(monkeypatch):
     # The brightness command is the fork's set_brightness bytes.
     assert captured[0] == brightness_payload(30)
     dev.close()
+
+
+def test_data_overtakes_pending_brightness(monkeypatch):
+    """With strict priority (no reserved brightness slot), a data frame
+    overtakes a waiting brightness command."""
+    monkeypatch.setattr(transport, "Client", _FakeClient)
+    gate = threading.Event()
+    sent = []
+
+    class Dev(transport.Device):
+        def _write_payload(self, payload):
+            sent.append(("data", payload))
+            if payload == b"first":
+                gate.wait(2.0)
+            self._execute(payload)
+
+        def _write_brightness(self, percent):
+            sent.append(("bright", percent))
+            self._execute(brightness_payload(percent))
+
+    dev = Dev("AA:BB:CC:DD:EE:FF", brightness_interval=0)
+    try:
+        dev.update(b"first")  # blocks the writer
+        assert _wait_for(lambda: len(sent) == 1)
+        dev.push_brightness(30)   # queued behind (writer busy)
+        dev.update(b"second")     # overtakes waiting brightness
+        gate.set()
+        assert _wait_for(lambda: len(sent) == 3)
+        assert [s[0] for s in sent] == ["data", "data", "bright"]
+        assert sent[1][1] == b"second"
+        assert sent[2][1] == 30
+    finally:
+        gate.set()
+        dev.close()
+
+
+def test_brightness_waits_until_no_data_pending(monkeypatch):
+    """Brightness is only sent when no data frame is pending."""
+    monkeypatch.setattr(transport, "Client", _FakeClient)
+    gate = threading.Event()
+    sent = []
+
+    class Dev(transport.Device):
+        def _write_payload(self, payload):
+            sent.append(("data", payload))
+            gate.wait(2.0)
+            self._execute(payload)
+
+        def _write_brightness(self, percent):
+            sent.append(("bright", percent))
+            self._execute(brightness_payload(percent))
+
+    dev = Dev("AA:BB:CC:DD:EE:FF")
+    try:
+        dev.update(b"frame")
+        assert _wait_for(lambda: len(sent) == 1)
+        dev.push_brightness(40)
+        time.sleep(0.05)
+        assert len(sent) == 1  # brightness still waiting behind data
+        gate.set()
+        assert _wait_for(lambda: len(sent) == 2)
+        assert [s[0] for s in sent] == ["data", "bright"]
+    finally:
+        gate.set()
+        dev.close()
+
+
+def test_priority_writer_queue_one_latest_wins_per_type(monkeypatch):
+    """Each type keeps only the newest pending item (queue depth 1)."""
+    monkeypatch.setattr(transport, "Client", _FakeClient)
+    gate = threading.Event()
+    sent = []
+
+    class Dev(transport.Device):
+        def _write_payload(self, payload):
+            sent.append(("data", payload))
+            if payload == b"block":
+                gate.wait(2.0)
+            self._execute(payload)
+
+        def _write_brightness(self, percent):
+            sent.append(("bright", percent))
+            self._execute(brightness_payload(percent))
+
+    dev = Dev("AA:BB:CC:DD:EE:FF", brightness_interval=0)
+    try:
+        dev.update(b"block")     # blocks the writer
+        assert _wait_for(lambda: len(sent) == 1)
+        dev.update(b"data1")
+        dev.update(b"data2")     # drops data1
+        dev.push_brightness(10)
+        dev.push_brightness(20)  # drops 10
+        gate.set()
+        assert _wait_for(lambda: len(sent) == 3)
+        assert sent[1:] == [("data", b"data2"), ("bright", 20)]
+        assert dev.dropped == 1
+        assert dev._writer.bright_dropped == 1
+    finally:
+        gate.set()
+        dev.close()
+
+
+def test_reserved_brightness_slot_under_data_load(monkeypatch):
+    """Under sustained data load one reserved slot per interval lets a
+    pending brightness change through (no forced update)."""
+    monkeypatch.setattr(transport, "Client", _FakeClient)
+    gates = {"block1": threading.Event(), "block2": threading.Event()}
+    sent = []
+
+    class Dev(transport.Device):
+        def _write_payload(self, payload):
+            sent.append(("data", payload))
+            gate = gates.get(payload.decode(errors="ignore"))
+            if gate is not None:
+                gate.wait(2.0)
+            self._execute(payload)
+
+        def _write_brightness(self, percent):
+            sent.append(("bright", percent))
+            self._execute(brightness_payload(percent))
+
+    dev = Dev("AA:BB:CC:DD:EE:FF", brightness_interval=10.0)
+    try:
+        dev.update(b"block1")    # blocks the writer
+        assert _wait_for(lambda: len(sent) == 1)
+        dev.push_brightness(1)
+        dev.update(b"d2")
+        gates["block1"].set()    # reserved slot available -> brightness first
+        assert _wait_for(lambda: len(sent) == 3)
+        assert [s[0] for s in sent[:3]] == ["data", "bright", "data"]
+        assert sent[1][1] == 1 and sent[2][1] == b"d2"
+
+        dev.update(b"block2")    # blocks again
+        assert _wait_for(lambda: len(sent) == 4)
+        dev.push_brightness(2)
+        dev.update(b"d3")
+        gates["block2"].set()    # slot not yet due -> data has priority
+        assert _wait_for(lambda: len(sent) == 6)
+        assert [s[0] for s in sent[3:6]] == ["data", "data", "bright"]
+        assert sent[4][1] == b"d3" and sent[5][1] == 2
+    finally:
+        for g in gates.values():
+            g.set()
+        dev.close()
+
+
+def test_no_forced_brightness_update_without_pending(monkeypatch):
+    """A reserved slot never forces a brightness send when none is pending."""
+    monkeypatch.setattr(transport, "Client", _FakeClient)
+    gate = threading.Event()
+    sent = []
+
+    class Dev(transport.Device):
+        def _write_payload(self, payload):
+            sent.append(("data", payload))
+            if payload == b"block":
+                gate.wait(2.0)
+            self._execute(payload)
+
+        def _write_brightness(self, percent):
+            sent.append(("bright", percent))
+            self._execute(brightness_payload(percent))
+
+    dev = Dev("AA:BB:CC:DD:EE:FF", brightness_interval=0.01)
+    try:
+        dev.update(b"block")
+        assert _wait_for(lambda: len(sent) == 1)
+        dev.update(b"d2")       # no brightness pending
+        time.sleep(0.03)         # reserved slot would be due, but nothing queued
+        gate.set()
+        assert _wait_for(lambda: len(sent) == 2)
+        assert [s[0] for s in sent] == ["data", "data"]
+    finally:
+        gate.set()
+        dev.close()
+
+
+def test_priority_writer_error_surfaces_on_next_push(monkeypatch):
+    """A failed write surfaces on the analysis thread on the next push,
+    and queued work is discarded so reconnect can start clean."""
+    monkeypatch.setattr(transport, "Client", _FakeClient)
+    calls = []
+
+    class Dev(transport.Device):
+        def _write_payload(self, payload):
+            calls.append(payload)
+            if payload == b"boom":
+                raise RuntimeError("link lost")
+            self._execute(payload)
+
+    dev = Dev("AA:BB:CC:DD:EE:FF")
+    try:
+        dev.update(b"boom")
+        assert _wait_for(lambda: dev._writer.errors == 1)
+        with pytest.raises(RuntimeError, match="link lost"):
+            dev.update(b"next")
+        dev.update(b"ok")  # error consumed -> accepted again
+        assert _wait_for(lambda: b"ok" in calls)
+        assert calls == [b"boom", b"ok"]
+    finally:
+        dev.close()

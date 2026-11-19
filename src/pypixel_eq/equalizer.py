@@ -56,8 +56,9 @@ class Equalizer:
                  rhythm_style=0, send_hz=0.0, auto_gain=True,
                  gain_window=5.0, gain_percentile=100.0, band_stat="peak",
                  tilt=0.0, brightness_min=100, brightness_max=100,
-                 brightness_mode="static",
-                 overlap=0, queue_size=1,
+                 brightness_mode="static", brightness_bass_bands=(0, 2),
+                 brightness_interval=1.0,
+                 overlap=0,
                  write_with_response=True,
                  attack=ATTACK, release=RELEASE):
         self.address = address
@@ -74,12 +75,16 @@ class Equalizer:
             raise ValueError("release must be > 0")
         self.attack = attack
         self.release = release
-        # Device writes run on a background thread in transport.Device:
-        # update() hands over the frame and returns, so the analysis loop
-        # keeps its rate. queue_size is the number of frames that may wait
-        # for the radio (the oldest unsent frame is dropped when full).
-        self.queue_size = queue_size
+        # Device writes run on a background writer in transport.Device:
+        # update()/push_brightness() hand over work and return, so the
+        # analysis loop keeps its rate. Data has priority over brightness
+        # and both use a latest-wins slot (queue depth 1).
         self.write_with_response = write_with_response
+        # Minimum seconds between brightness writes under sustained data load
+        # (0 = strict data priority).
+        if brightness_interval < 0:
+            raise ValueError("brightness_interval must be >= 0")
+        self.brightness_interval = float(brightness_interval)
         # Throttle the frames SENT to the device (0 = send every frame).
         # Audio analysis always runs at the native hop rate; only the
         # panel writes are thinned, so level smoothing stays correct.
@@ -157,6 +162,14 @@ class Equalizer:
                 "brightness_mode must be 'static', 'auto' or 'bass'")
         self.brightness_mode = brightness_mode
         self.brightness_source = brightness_source
+        lo, hi = brightness_bass_bands
+        lo = int(lo)
+        hi = int(hi)
+        if not (0 <= lo <= hi < N_BANDS):
+            raise ValueError(
+                "brightness_bass_bands must satisfy 0 <= lo <= hi < N_BANDS")
+        self.brightness_bass_lo = lo
+        self.brightness_bass_hi = hi
         # The ramp smooths the brightness and only emits a value when it
         # moved far enough; the device is set to the minimum at connect,
         # so the ramp starts there and the first frame neither dips nor
@@ -293,12 +306,12 @@ class Equalizer:
         enough (a step, e.g. 5%), so a brightness write is a 5-byte
         command per actual step only - quiet passages hold the last
         value, loud/bass hits step up. Source: overall loudness (RMS of
-        the window) by default, or bass presence (B0..B2, ~20-115 Hz)
-        from the current band levels when ``brightness_source`` is
-        ``"bass"``. In the static mode the ramp is never fed and the
-        panel holds the connect value. A failed write is re-raised by
-        ``push_brightness`` on the next call, so the reconnect path
-        still runs on the analysis thread.
+        the window) by default, or bass presence from the selected
+        band levels (default B0..B2, ~20-115 Hz) when
+        ``brightness_source`` is ``"bass"``. In the static mode the ramp
+        is never fed and the panel holds the connect value. A failed
+        write is re-raised by ``push_brightness`` on the next call, so
+        the reconnect path still runs on the analysis thread.
         """
         if dev is None or self.brightness_mode != "auto":
             return dev
@@ -306,8 +319,11 @@ class Equalizer:
             # Bass presence from the displayed band levels (0-15), derived
             # from the current peak/rms analysis: reacts to whether bass
             # is there, even in quiet passages, instead of absolute dB.
-            bass = max((max(0.0, min(15.0, float(lv))) for lv in levels[:3]),
-                       default=0.0)
+            lo = self.brightness_bass_lo
+            hi = self.brightness_bass_hi
+            bass = max(
+                (max(0.0, min(15.0, float(lv))) for lv in levels[lo:hi + 1]),
+                default=0.0)
             from .audio import LLOUD_FLOOR, LLOUD_CEIL
             level = LLOUD_FLOOR + (bass / 15.0) * (LLOUD_CEIL - LLOUD_FLOOR)
         else:
@@ -320,7 +336,6 @@ class Equalizer:
             return dev
         try:
             dev.push_brightness(to_send)
-            self._put_note(f"brightness -> {to_send}%")
         except Exception as e:
             self._put_note(f"brightness send failed ({e}) - reconnecting")
             return self._reconnect(dev)
@@ -345,9 +360,9 @@ class Equalizer:
         try:
             dev = Device(self.address, transport=self.transport,
                          rhythm_style=self.rhythm_style,
-                         queue_size=self.queue_size,
                          write_with_response=self.write_with_response,
-                         brightness=self.brightness)
+                         brightness=self.brightness,
+                         brightness_interval=self.brightness_interval)
         except Exception as e:
             self._put_note(f"connect failed ({e}) - display only")
             return None
@@ -375,9 +390,9 @@ class Equalizer:
                 if dev is None:
                     new = Device(self.address, transport=self.transport,
                                  rhythm_style=self.rhythm_style,
-                                 queue_size=self.queue_size,
                                  write_with_response=self.write_with_response,
-                                 brightness=self.brightness)
+                                 brightness=self.brightness,
+                                 brightness_interval=self.brightness_interval)
                 else:
                     dev.reconnect()
                     new = dev

@@ -158,6 +158,124 @@ class _PayloadSender:
             self.dropped += 1
 
 
+class _PriorityWriter:
+    """Single background writer: data priority over brightness.
+
+    Two latest-wins slots (queue depth 1 each): a pending data payload and a
+    pending brightness value. Data is sent first. Brightness is sent when no
+    data is pending; under sustained data load one send slot per
+    ``brightness_interval`` seconds is reserved for a pending brightness change
+    so it cannot starve (no forced update, 0 disables). A send error is
+    remembered and re-raised by the next push, so reconnect runs on the
+    analysis thread.
+    """
+
+    def __init__(self, send_data, send_brightness, brightness_interval=1.0):
+        self._send_data = send_data
+        self._send_brightness = send_brightness
+        self._brightness_interval = max(0.0, float(brightness_interval))
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._stop = False
+        self._error = None
+        self._pending_data = None
+        self._pending_bright = None
+        self.data_sent = 0
+        self.data_dropped = 0
+        self.bright_dropped = 0
+        self.errors = 0
+        self.last_data_ms = None
+        # Allow the first brightness send through immediately when enabled.
+        self._last_bright_send = time.monotonic() - self._brightness_interval
+        self._thread = threading.Thread(
+            target=self._run, name="pixel-writer", daemon=True)
+        self._thread.start()
+
+    @property
+    def thread(self):
+        return self._thread
+
+    def push_data(self, payload):
+        """Queue one data payload; raise the error of a failed send, if any."""
+        with self._cond:
+            if self._error is not None:
+                error, self._error = self._error, None
+                raise error
+            if self._pending_data is not None:
+                self.data_dropped += 1
+            self._pending_data = payload
+            self._cond.notify()
+
+    def push_brightness(self, percent):
+        """Queue one brightness value; raise the error of a failed send, if any."""
+        with self._cond:
+            if self._error is not None:
+                error, self._error = self._error, None
+                raise error
+            if self._pending_bright is not None:
+                self.bright_dropped += 1
+            self._pending_bright = percent
+            self._cond.notify()
+
+    def stop(self, timeout=2.0):
+        """Stop the writer and discard pending work."""
+        with self._cond:
+            self._stop = True
+            self._pending_data = None
+            self._pending_bright = None
+            self._cond.notify_all()
+        self._thread.join(timeout)
+
+    def _run(self):
+        while True:
+            with self._cond:
+                while (not self._stop
+                       and self._pending_data is None
+                       and self._pending_bright is None):
+                    self._cond.wait()
+                if self._stop:
+                    return
+                now = time.monotonic()
+                # Reserve one slot per interval for a pending brightness change
+                # when data is continuously pending (no forced update).
+                brightness_slot = (
+                    self._brightness_interval > 0
+                    and (now - self._last_bright_send)
+                    >= self._brightness_interval)
+                if (self._pending_data is not None
+                        and self._pending_bright is not None
+                        and brightness_slot):
+                    kind = "bright"
+                    item = self._pending_bright
+                    self._pending_bright = None
+                elif self._pending_data is not None:
+                    kind = "data"
+                    item = self._pending_data
+                    self._pending_data = None
+                else:
+                    kind = "bright"
+                    item = self._pending_bright
+                    self._pending_bright = None
+            t0 = time.perf_counter()
+            try:
+                if kind == "data":
+                    self._send_data(item)
+                else:
+                    self._send_brightness(item)
+            except Exception as e:
+                with self._cond:
+                    self._error = e
+                    self._pending_data = None
+                    self._pending_bright = None
+                self.errors += 1
+                continue
+            if kind == "data":
+                self.last_data_ms = (time.perf_counter() - t0) * 1000.0
+                self.data_sent += 1
+            else:
+                self._last_bright_send = time.monotonic()
+
+
 def bar_color(band, frac):
     """Band color: fixed hue per band, brightness by absolute row.
 
@@ -262,33 +380,38 @@ class Device:
     transport "rhythm": 11 band levels to the panel's native visualizer
         (the panel draws the bars; a live layer - reverts on a gap).
 
-    Writes run on a background thread (see :class:`_PayloadSender`):
-    ``update()`` never blocks on the radio, ``send_ms`` reports the last
-    completed send, and a failed send surfaces on the next ``update()``.
+    Writes run on a single background writer (see :class:`_PriorityWriter`):
+    data frames have priority over brightness commands, and both are
+    latest-wins with a queue depth of 1 (old unsent items are discarded).
+    Under sustained data load a pending brightness command may still be sent
+    at most once per ``brightness_interval``. ``update()``/``push_brightness()``
+    never block on the radio; ``send_ms`` reports the last completed data send;
+    a failed send surfaces on the next call.
     """
 
     def __init__(self, address, transport="png", rhythm_style=0,
-                 queue_size=1, write_with_response=True, brightness=100):
+                 queue_size=1, write_with_response=True, brightness=100,
+                 brightness_interval=1.0):
         self.address = address
         self.transport = transport
         self.rhythm_style = rhythm_style
-        self.queue_size = max(1, int(queue_size))
+        # Queue depth is fixed to 1 for both data and brightness (latest wins).
+        self.queue_size = 1
         self.write_with_response = bool(write_with_response)
         # Panel brightness (0..100) to set at connect and after every
         # reconnect. None = don't touch it (the panel keeps its last value).
         self.brightness = brightness
-        self._sender = None
+        # Minimum interval between brightness writes when data is pending.
+        self.brightness_interval = float(brightness_interval)
+        self._writer = None
         # Chunks are written with response (the package default): neither
         # transport produces a protocol ACK we wait for (rhythm never
         # does; the image plan's ACK wait is forced off below), so the
         # link-layer round trip costs little and keeps the radio healthy.
         self.client = self._open_client(brightness)
-        self._sender = _PayloadSender(self._write_payload, self.queue_size)
-        # A second writer for the panel brightness command: one BLE write
-        # per change (the ramp throttles these to actual steps), and it
-        # rides its own latest-wins slot so it can never be dropped by the
-        # frame queue. It shares the client/session (and the error path).
-        self._bright_sender = _PayloadSender(self._write_brightness, 1)
+        self._writer = _PriorityWriter(
+            self._write_payload, self._write_brightness,
+            brightness_interval=self.brightness_interval)
 
     def _open_client(self, brightness=0):
         """Open a fresh client, read the panel size, blank the display.
@@ -319,7 +442,7 @@ class Device:
         self._execute(payload)
 
     def _write_brightness(self, percent):
-        """Blocking write of one panel brightness command (its writer)."""
+        """Blocking write of one panel brightness command (runs on the writer)."""
         self._execute(brightness_payload(percent))
 
     def _execute(self, payload):
@@ -344,60 +467,57 @@ class Device:
         A fresh ``Client`` (rather than reusing a wedged session) is the
         reliable recovery path: the old event-loop thread is left to its
         atexit cleanup and the new client starts from a clean state. The
-        writers are stopped before the old link closes and restarted after
-        the new one is up, so no frame is ever written to a dead session.
+        writer is stopped before the old link closes and restarted after
+        the new one is up, so no command is ever written to a dead session.
         """
         self.close()
         self.client = self._open_client(self.brightness)
-        self._sender = _PayloadSender(self._write_payload, self.queue_size)
-        self._bright_sender = _PayloadSender(self._write_brightness, 1)
+        self._writer = _PriorityWriter(
+            self._write_payload, self._write_brightness,
+            brightness_interval=self.brightness_interval)
 
     def update(self, payload):
         """Queue one full-frame payload; returns immediately.
 
-        The frame replaces any unsent frame (latest wins), so the caller
-        keeps its analysis rate while the panel runs at the link's rate.
-        A send failure is re-raised here on the next call; the caller's
-        reconnect path then runs unchanged.
+        Data has priority over brightness. The frame replaces any unsent
+        frame (latest wins, queue depth 1). A send failure is re-raised here
+        on the next call; the caller's reconnect path then runs unchanged.
         """
-        if not payload or self.client is None or self._sender is None:
+        if not payload or self.client is None or self._writer is None:
             return
-        self._sender.push(payload)
+        self._writer.push_data(payload)
 
     def push_brightness(self, percent):
         """Queue a panel brightness command (0..100); returns immediately.
 
-        Runs on its own background writer (one write per actual change -
-        the caller only calls this when the ramp stepped), so it is not
-        throttled by the frame rate and cannot be dropped by the frame
-        queue. A failed write is re-raised on the next call, so the
+        Brightness is queued behind data; under sustained data load one slot per
+        ``brightness_interval`` is reserved for a pending brightness change (no
+        forced update). It replaces any unsent brightness command (latest wins,
+        queue depth 1). A failed write is re-raised on the next call, so the
         reconnect path still runs on the analysis thread.
         """
-        if self.client is None or self._bright_sender is None:
+        if self.client is None or self._writer is None:
             return
-        self._bright_sender.push(percent)
+        self._writer.push_brightness(percent)
 
     @property
     def send_ms(self):
-        """Duration of the last completed write, or None before the first."""
-        if self._sender is None:
+        """Duration of the last completed data write, or None before the first."""
+        if self._writer is None:
             return None
-        return self._sender.last_ms
+        return self._writer.last_data_ms
 
     @property
     def dropped(self):
-        """Frames dropped because the link was slower than the analysis."""
-        if self._sender is None:
+        """Data frames dropped because the link was slower than the analysis."""
+        if self._writer is None:
             return 0
-        return self._sender.dropped
+        return self._writer.data_dropped
 
     def close(self):
-        sender, self._sender = self._sender, None
-        if sender is not None:
-            sender.stop()
-        bright_sender, self._bright_sender = self._bright_sender, None
-        if bright_sender is not None:
-            bright_sender.stop()
+        writer, self._writer = self._writer, None
+        if writer is not None:
+            writer.stop()
         client, self.client = self.client, None
         self._session = None
         if client is None:

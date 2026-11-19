@@ -340,6 +340,55 @@ def test_auto_mode_sends_only_on_a_step():
     assert eq.current_brightness == 80
 
 
+def test_cli_brightness_bass_bands_default_and_forwarding():
+    """--brightness-bass-bands defaults to 0 2 (B0..B2) and is forwarded."""
+    from pypixel_eq.__main__ import build_parser
+    args = build_parser().parse_args([])
+    assert args.brightness_bass_bands == [0, 2]
+    custom = build_parser().parse_args(
+        ["--brightness-bass-bands", "1", "4"])
+    assert custom.brightness_bass_bands == [1, 4]
+    eq = Equalizer(brightness_mode="bass",
+                   brightness_bass_bands=tuple(custom.brightness_bass_bands))
+    assert (eq.brightness_bass_lo, eq.brightness_bass_hi) == (1, 4)
+
+
+def test_cli_rejects_invalid_brightness_bass_bands(monkeypatch):
+    import sys
+    from pypixel_eq.__main__ import main
+    for argv in (["prog", "--brightness-bass-bands", "3", "2"],
+                 ["prog", "--brightness-bass-bands", "-1", "0"],
+                 ["prog", "--brightness-bass-bands", "0", "11"]):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit):
+            main()
+
+
+def test_invalid_brightness_bass_bands_rejected():
+    for bad in ((-1, 2), (0, 11), (3, 2), (0, -1)):
+        with pytest.raises(ValueError):
+            Equalizer(brightness_bass_bands=bad)
+
+
+def test_brightness_bass_bands_select_source():
+    """Bass brightness follows only the selected band range (default 0..2)."""
+    eq = Equalizer(brightness_min=50, brightness_max=100,
+                   brightness_mode="bass", brightness_bass_bands=(4, 5))
+    dev = _BrightStub()
+    buf = np.zeros(audio.FRAME)
+    # Loud only in the default bass bands: outside the selected range.
+    low_only = [15, 15, 15] + [0] * (audio.N_BANDS - 3)
+    for _ in range(200):
+        eq._send_bright(dev, buf, low_only)
+    assert dev.pushed == []
+    # Loud only in the selected range: brightness steps up.
+    selected = [0] * 4 + [15, 15] + [0] * (audio.N_BANDS - 6)
+    for _ in range(200):
+        eq._send_bright(dev, buf, selected)
+    assert dev.pushed
+    assert dev.pushed[-1] > 50
+
+
 def test_cli_attack_and_release_flags():
     """--attack/--release default to the module tunables and are forwarded."""
     from pypixel_eq.__main__ import build_parser
