@@ -2,6 +2,13 @@
 
 Guidance for AI agents and contributors working on **pypixel-eq**.
 
+## Agent notes
+
+- Current branch `main` is **ahead of `origin/main` by 2 commits** (tip `3ad2606`); the uncommitted change is in `src/pypixel_eq/equalizer.py` (bass brightness immediate, buffer shift guards).
+- Submodule `pypixelcolor/` is pinned at `7dfcd6c027a00d070480f8f71f26e7cfd7d5d628` (v0.5.0-47-g7dfcd6c) and must stay untouched.
+- `logs/` is untracked and must remain untouched.
+- Do not commit `local_test/`, hardware logs, captures or `todo` notes.
+
 ## The project
 
 `pypixel-eq` captures the system audio output, analyzes it into 11 log-spaced

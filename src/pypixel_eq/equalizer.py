@@ -26,7 +26,7 @@ import numpy as np
 
 from .audio import (
     SAMPLE_RATE, FRAME, N_BANDS, BAND_LO, BAND_HI, DB_FLOOR, DB_CEIL,
-    ATTACK, RELEASE,
+    ATTACK, RELEASE, LLOUD_FLOOR, LLOUD_CEIL, _brightness_from_db,
     AutoCeiling, band_centers, BrightnessRamp, find_loopback_input,
     loudness_db, make_band_masks, levels_from_db, tilt_db, analyze_frame,
 )
@@ -316,22 +316,19 @@ class Equalizer:
         if dev is None or self.brightness_mode != "auto":
             return dev
         if self.brightness_source == "bass":
-            # Bass presence from the displayed band levels (0-15), derived
-            # from the current peak/rms analysis: reacts to whether bass
-            # is there, even in quiet passages, instead of absolute dB.
             lo = self.brightness_bass_lo
             hi = self.brightness_bass_hi
             bass = max(
                 (max(0.0, min(15.0, float(lv))) for lv in levels[lo:hi + 1]),
                 default=0.0)
-            from .audio import LLOUD_FLOOR, LLOUD_CEIL
             level = LLOUD_FLOOR + (bass / 15.0) * (LLOUD_CEIL - LLOUD_FLOOR)
+            to_send = self._bright.update(self.dt, level)
         else:
             level = loudness_db(buf)
-        to_send = self._bright.update(self.dt, level)
+            to_send = self._bright.update(self.dt, level)
         logger.debug(
-            "brightness[%s] level=%.2f value=%s send=%s",
-            self.brightness_source, level, self._bright.value, to_send)
+            "brightness[%s] send=%s value=%s",
+            self.brightness_source, to_send, self._bright.value)
         if to_send is None:
             return dev
         try:
@@ -493,7 +490,9 @@ class Equalizer:
                         + b * 0.6))
                     amp = 10.0 ** (db / 20.0)
                     new += amp * np.sin(2 * np.pi * freqs[b] * ts)
-                buf[FRAME - to_read:] = new
+                if to_read < FRAME:
+                    buf[:-to_read] = buf[to_read:]
+                buf[-to_read:] = new
                 mag_db = self._analyze(buf, masks, full_scale)
                 levels = self._levels(mag_db, state)
                 img, n_points, payload = self._payload(levels, mag_db)
@@ -563,7 +562,9 @@ class Equalizer:
                     mono = samples.reshape(-1, channels).mean(axis=1)
                 else:
                     mono = samples
-                buf[FRAME - to_read:] = mono[:to_read]
+                if to_read < FRAME:
+                    buf[:-to_read] = buf[to_read:]
+                buf[-to_read:] = mono[:to_read]
                 n_read += to_read
                 mag_db = self._analyze(buf, masks, full_scale)
                 levels = self._levels(mag_db, state)
